@@ -3,6 +3,12 @@
 Reference: `reference/c-iouring-pavlyhalim/` at merged commit `6a1eab9` (read-only copy, unmodified).
 Files that matter: `src/server.c` (event loop), `src/sys.h` (raw io_uring ABI), `src/http.h` (parser).
 
+Ours, in `bulkapi/src/`: `backend_uring.cpp` and `backend_epoll.cpp` (event loops), `http.cpp` (parser,
+routing, serialisation), `conn.cpp` (connection buffers), `handlers.cpp`, `json.cpp`, `store.h`.
+Measured numbers are in `bulkapi/RESULTS.md`.
+
+Status (2026-11-10): none of the items under "What bulkapi should take" is implemented yet.
+
 ## Different goals
 
 | | bulkapi (ours) | c-iouring-pavlyhalim |
@@ -54,6 +60,13 @@ Ours: pooled `Conn` objects, frees oversized buffers when idle. No idle timeout,
 ### 9. HTTP parsing
 Basically the same approach in both: `memmem` for `\r\n\r\n`, length-switch on header name, case-insensitive compare, reject `Transfer-Encoding`. They answer bad input 400+close; so do we.
 
+### 10. Routing and the response path
+- **Routing, ours:** `tools/gen_routes.py` compiles `api.spec` into static tables plus a linear chain of `if`s (split the path into segments, then test routes one by one). Measured 12-28 ns per match. The three `/items/:id` routes emit the same path test three times, and `process()` calls `parse_method` twice per request. A literal only wins for its own method: `GET /items/bulk` falls through to `/items/:id` and returns 400 "bad id" instead of 405.
+- **Routing, theirs:** hand-written, method first, then `memcmp` on the path (`app_handle` in `app.h`). Similar cost, no spec, five endpoints.
+- **Response, ours:** the handler writes into `Res.body`, then `serialize()` copies it into `c.out` - the body is copied twice. Error responses are built with string appends on every request.
+- **Response, theirs:** the body is written once into the arena at `free + HDR_ROOM` and the headers are placed in front of it (`resp_frame`); every error response is a constant prepared at startup (`app_init_responses`).
+- Routing cost is negligible next to a syscall. The double copy matters for large `bulk/get` responses.
+
 ## What bulkapi should take, in order
 
 1. **Poll + provided-buffer ring + bounded read queue** instead of a per-connection buffer and an always-armed recv. Biggest win for connection count and memory. Keep our "process everything buffered" path for pipelined throughput.
@@ -61,10 +74,11 @@ Basically the same approach in both: `memmem` for `\r\n\r\n`, length-switch on h
 3. **Generation counters in user_data** - a prerequisite for 1 and 2 (several ops per connection).
 4. **Timed batched wait** (`EXT_ARG`, min N CQEs or ~1-2 ms) and publishing CQ head / buffer tail every 256 CQEs.
 5. **Idle sweep** and an accept cutoff before the table is full.
-6. Optional: more listeners per thread, prefault/mlock, PGO.
+6. **Write the response body once** with header room in front, and precompute the constant error responses.
+7. Optional: more listeners per thread, prefault/mlock, PGO.
 
 ## What not to take
-- One answer per connection per batch - it would throw away our pipelining numbers (~1.9M vs ~200k req/s).
+- One answer per connection per batch - it would throw away our pipelining numbers (~1.1M vs ~210k req/s on a 4-core laptop, see `bulkapi/RESULTS.md`).
 - Group commit / arenas held until commit - we have no durable store; send immediately.
 - The memory valve - their own measurements say it made things worse.
 - Single-threaded design - right for 1 vCPU, wrong for a multi-core box; per-thread rings already give us that.
