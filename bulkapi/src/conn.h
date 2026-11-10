@@ -22,6 +22,8 @@ struct Conn {
     std::string out;
     size_t out_off = 0;
     bool want_close = false, sent100 = false, ep_out = false;
+    // uring-ms backend only: a receive and a send can be outstanding at the same time
+    bool recv_armed = false, recv_cancel = false, sending = false, closing = false, peer_eof = false;
 };
 
 Conn* conn_new(int fd);       // takes a Conn from the calling thread's pool

@@ -5,7 +5,9 @@
 // Routes come from api.spec via tools/gen_routes.py -> build/routes_gen.h.
 //
 //   main.cpp            CLI, worker threads, backend selection
-//   backend_uring.cpp   io_uring event loop
+//   backend_uring.cpp   io_uring event loop (single-shot receive)
+//   backend_uring_ms.cpp  io_uring event loop with multishot receive
+//   uring.h             raw-syscall io_uring wrapper shared by both
 //   backend_epoll.cpp   epoll event loop
 //   net.{h,cpp}         listener / socket options
 //   http.{h,cpp}        request framing, routing, response serialisation
@@ -33,7 +35,7 @@
 Stats g_stats[kMaxWorkers];
 int g_nworkers = 1;
 
-enum Backend { B_AUTO, B_URING, B_EPOLL };
+enum Backend { B_AUTO, B_URING, B_URING_MS, B_EPOLL };
 
 static void worker_main(int id, int port, Backend be, bool pin) {
     Worker w;
@@ -48,6 +50,11 @@ static void worker_main(int id, int port, Backend be, bool pin) {
     }
     int lfd = make_listener(port);
     if (lfd < 0) { perror("listen"); exit(1); }
+    if (be == B_URING_MS) {
+        if (run_uring_ms(w, lfd)) return;
+        fprintf(stderr, "worker %d: io_uring multishot receive unavailable\n", id);
+        exit(1);
+    }
     if (be != B_EPOLL) {
         if (run_uring(w, lfd)) return;
         if (be == B_URING) { fprintf(stderr, "worker %d: io_uring unavailable\n", id); exit(1); }
@@ -72,9 +79,9 @@ int main(int argc, char** argv) {
         else if (a == "--pin") pin = true;
         else if (a == "--backend") {
             std::string b = next();
-            be = b == "uring" ? B_URING : b == "epoll" ? B_EPOLL : B_AUTO;
+            be = b == "uring" ? B_URING : b == "uring-ms" ? B_URING_MS : b == "epoll" ? B_EPOLL : B_AUTO;
         } else {
-            fprintf(stderr, "usage: %s [-p port] [-t threads] [--backend auto|uring|epoll] [--pin]\n", argv[0]);
+            fprintf(stderr, "usage: %s [-p port] [-t threads] [--backend auto|uring|uring-ms|epoll] [--pin]\n", argv[0]);
             return 2;
         }
     }

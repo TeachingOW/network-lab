@@ -15,6 +15,7 @@ Conn* conn_new(int fd) {
     c->fd = fd;
     c->in_len = c->need_total = c->out_off = 0;
     c->want_close = c->sent100 = c->ep_out = false;
+    c->recv_armed = c->recv_cancel = c->sending = c->closing = c->peer_eof = false;
     c->out.clear();
     if (!c->in) { c->in = (char*)malloc(kInitBuf); c->in_cap = kInitBuf; }
     return c;
