@@ -7,8 +7,10 @@
 //
 // Differences from backend_uring.cpp (single-shot receive):
 //   - no RECV re-submission per request: the receive is armed once
-//   - data arrives in shared 16 KB buffers and is copied into the connection's
-//     own buffer, so a request costs one extra copy
+//   - no buffer per connection: a request is parsed in place in the shared 16 KB
+//     receive buffer, and an output buffer is borrowed from a per-worker pool
+//     only while a reply exists. A private input buffer is allocated only while
+//     a request is incomplete or input arrives during a send, and freed after.
 //   - a receive stays armed while a send is in flight, so a connection can
 //     have two operations outstanding; it is only freed once both have ended
 
@@ -32,6 +34,8 @@ constexpr unsigned kBufs = 1024;         // per worker; must be a power of two
 constexpr unsigned kBufSize = 16 * 1024;
 constexpr int kBufGroup = 0;
 constexpr size_t kBacklogCap = 1 << 20;  // unprocessed input allowed while a send is in flight
+constexpr size_t kSso = 15;              // capacity of an empty std::string (no heap buffer)
+constexpr unsigned kBusy = 32;           // completions in a turn that count as high load
 
 // user_data = Conn* | op
 enum : u64 { OP_ACCEPT = 0, OP_RECV = 1, OP_SEND = 2, OP_CANCEL = 3, OP_MASK = 7 };
@@ -42,6 +46,7 @@ struct Loop {
     char* bufs = nullptr;
     Worker& w;
     std::vector<Conn*> rearm;  // connections whose receive ended and should be armed again
+    std::vector<std::string> outs;  // spare output buffers, lent to a connection while it has a reply
     explicit Loop(Worker& wk) : w(wk) {}
 
     bool init() {
@@ -105,7 +110,10 @@ struct Loop {
 
     // A connection is freed only when neither a receive nor a send can still complete on it.
     void maybe_free(Conn* c) {
-        if (c->closing && !c->recv_armed && !c->sending) conn_free(c);
+        if (!c->closing || c->recv_armed || c->sending) return;
+        drop_in(c);
+        give_out(c);
+        conn_free(c);
     }
     void start_close(Conn* c) {
         if (c->closing) return;
@@ -114,7 +122,16 @@ struct Loop {
         maybe_free(c);
     }
 
-    static void append_in(Conn* c, const char* p, size_t n) {
+    // --- buffers. A connection owns none while idle: input is parsed in the shared receive
+    // buffer, and an output buffer is borrowed from the worker's pool only while a reply exists.
+
+    static void drop_in(Conn* c) {
+        free(c->in);
+        c->in = nullptr;
+        c->in_cap = c->in_len = 0;
+    }
+    // Keeps bytes that cannot be handled yet (a partial request, or input that arrived mid-send).
+    static void stash(Conn* c, const char* p, size_t n) {
         size_t want = c->in_len + n;
         if (want > c->in_cap) {
             size_t ncap = std::max({want, c->need_total, c->in_cap * 2});
@@ -124,25 +141,63 @@ struct Loop {
         memcpy(c->in + c->in_len, p, n);
         c->in_len += n;
     }
+    void take_out(Conn* c) {
+        if (c->out.capacity() > kSso || outs.empty()) return;
+        c->out.swap(outs.back());
+        outs.pop_back();
+    }
+    void give_out(Conn* c) {
+        if (c->out.capacity() <= kSso) return;
+        c->out.clear();
+        if (c->out.capacity() <= (1u << 20) && outs.size() < 4096) outs.push_back(std::move(c->out));
+        c->out = std::string();
+    }
 
-    // Handle whatever complete requests are buffered; start a send if that produced output.
+    // After process(): send what it produced, or hand the output buffer back.
+    void after_process(Conn* c) {
+        if (!c->out.empty()) { prep_send(c); return; }
+        give_out(c);
+        if (c->want_close) start_close(c);
+    }
+
+    // Handle the requests held in the connection's private buffer.
     void run(Conn* c) {
         if (c->need_total && c->in_len < c->need_total) return;  // a large body is still arriving
+        take_out(c);
         process(*c, w);
-        if (!c->out.empty()) prep_send(c);
-        else if (c->want_close) start_close(c);
+        if (c->in_len == 0) drop_in(c);
+        after_process(c);
+    }
+
+    // New bytes from the shared receive buffer p[0..n), which goes back to the kernel on return.
+    void feed(Conn* c, char* p, size_t n) {
+        if (c->in_len || c->sending) {  // already holding input, or a reply is in flight: keep a copy
+            stash(c, p, n);
+            if (!c->sending) run(c);
+            else if (c->in_len > kBacklogCap && c->recv_armed && !c->recv_cancel) prep_cancel_recv(c);  // backpressure
+            return;
+        }
+        // The common case: parse in place, no copy and no per-connection buffer.
+        c->in = p;
+        c->in_cap = c->in_len = n;
+        take_out(c);
+        process(*c, w);  // leaves any incomplete request at the front of p
+        size_t left = c->in_len;
+        c->in = nullptr;
+        c->in_cap = c->in_len = 0;
+        if (left) stash(c, p, left);
+        after_process(c);
     }
 
     void on_recv(Conn* c, int res, unsigned flags) {
         bool has_buf = flags & IORING_CQE_F_BUFFER;
         unsigned bid = flags >> IORING_CQE_BUFFER_SHIFT;
-        if (res > 0 && has_buf && !c->closing) append_in(c, buf_ptr(bid), (size_t)res);
-        if (has_buf) buf_return(bid);
         if (!(flags & IORING_CQE_F_MORE)) c->recv_armed = c->recv_cancel = false;  // the multishot ended
+        if (res > 0 && has_buf && !c->closing) feed(c, buf_ptr(bid), (size_t)res);
+        if (has_buf) buf_return(bid);
+        if (c->fd < 0) return;  // feed() closed and freed it
         if (c->closing) { maybe_free(c); return; }
         if (res > 0) {
-            if (!c->sending) run(c);
-            else if (c->in_len > kBacklogCap && c->recv_armed && !c->recv_cancel) prep_cancel_recv(c);  // backpressure
             if (!c->recv_armed) rearm.push_back(c);
         } else if (res == -ENOBUFS || res == -EINTR || res == -EAGAIN) {
             rearm.push_back(c);  // buffer ring ran dry: arm again after this batch has returned its buffers
@@ -166,9 +221,9 @@ struct Loop {
         if (c->out_off < c->out.size()) { prep_send(c); return; }
         c->out.clear();
         c->out_off = 0;
-        if (c->out.capacity() > (1u << 20)) std::string().swap(c->out);
-        if (c->want_close) { start_close(c); return; }
+        if (c->want_close) { give_out(c); start_close(c); return; }
         if (c->in_len) run(c);  // requests that arrived while the send was in flight
+        else give_out(c);
         if (c->fd < 0 || c->closing) return;
         if (c->peer_eof) { if (!c->sending) start_close(c); return; }
         if (!c->recv_armed) rearm.push_back(c);
@@ -180,17 +235,28 @@ struct Loop {
 bool run_uring_ms(Worker& w, int lfd) {
     Loop L(w);
     if (!L.init()) return false;
-    fprintf(stderr, "worker %d: io_uring multishot recv (liburing %d.%d, %u x %u KB buffers)\n", w.id,
-            io_uring_major_version(), io_uring_minor_version(), kBufs, kBufSize / 1024);
+    // BULKAPI_BATCH_US=N: when the previous turn was busy, wait up to N microseconds for half as
+    // many completions again (at most 64) instead of waking for the first one. 0 or unset = off.
+    const char* env = getenv("BULKAPI_BATCH_US");
+    long batch_us = env ? atol(env) : 0;
+    fprintf(stderr, "worker %d: io_uring multishot recv (liburing %d.%d, %u x %u KB shared buffers, batch wait %ld us)\n",
+            w.id, io_uring_major_version(), io_uring_minor_version(), kBufs, kBufSize / 1024, batch_us);
     L.prep_accept(lfd);
+    unsigned last = 0;
     for (;;) {
-        int rc = io_uring_submit_and_wait(&L.ring, 1);
-        if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY) {
+        int rc;
+        io_uring_cqe* cqe;
+        if (batch_us > 0 && last >= kBusy) {
+            __kernel_timespec ts{0, batch_us * 1000};
+            rc = io_uring_submit_and_wait_timeout(&L.ring, &cqe, std::min(last / 2, 64u), &ts, nullptr);
+        } else {
+            rc = io_uring_submit_and_wait(&L.ring, 1);
+        }
+        if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY && rc != -ETIME) {
             fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-rc));
             return true;
         }
         unsigned head, seen = 0;
-        io_uring_cqe* cqe;
         io_uring_for_each_cqe(&L.ring, head, cqe) {
             seen++;
             int res = cqe->res;
@@ -200,7 +266,7 @@ bool run_uring_ms(Worker& w, int lfd) {
             if (op == OP_ACCEPT) {
                 if (res >= 0) {
                     nodelay(res);
-                    Conn* nc = conn_new(res);
+                    Conn* nc = conn_new(res, false);  // no private input buffer
                     w.st->conns.store(w.st->conns.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
                     L.prep_recv_multishot(nc);
                 }
@@ -212,6 +278,7 @@ bool run_uring_ms(Worker& w, int lfd) {
             }  // OP_CANCEL: nothing to do; the cancelled receive posts its own completion
         }
         io_uring_cq_advance(&L.ring, seen);
+        last = seen;
         for (Conn* c : L.rearm)
             if (c->fd >= 0 && !c->closing && !c->recv_armed && !c->peer_eof) L.prep_recv_multishot(c);
         L.rearm.clear();

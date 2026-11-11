@@ -15,10 +15,12 @@ struct Req {
     std::string_view path, query, body;
     Params params;
 };
+// A handler appends its body to `body`, which is the connection's output buffer itself:
+// the body is written once, where it will be sent from. Handlers must only append.
 struct Res {
-    int status = 200;
-    const char* ctype = "application/json";
-    std::string body;
+    int status;
+    const char* ctype;
+    std::string& body;
 };
 
 // Appends {"error":"msg"} and sets the status.

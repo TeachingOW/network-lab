@@ -38,19 +38,23 @@ backends, including a 20 MB bulk upload and a 50,000-item bulk get.
 
 ## Benchmark
 
-One run each, 4 worker threads, `build/bench -t 4 -d 5 -w 3` on the same 4-core laptop (WSL2), JDK 11,
-`-Xms1g -Xmx2g -XX:+UseParallelGC`. All runs had 0 errors. Requests per second:
+Two rounds each, range shown. 4 worker threads, `build/bench -t 4 -d 4 -w 3` on the same 4-core laptop
+(WSL2), JDK 11, `-Xms1g -Xmx2g -XX:+UseParallelGC`. All runs had 0 errors. Requests per second:
 
-| Workload | C++ uring | C++ epoll | Java uring | Java epoll | Java sockets |
-|---|---|---|---|---|---|
-| get, 256 conns, pipeline 8 | 1,137,129 | 1,011,079 | 623,585 | 899,082 | 855,987 |
-| get, 256 conns, no pipelining | 191,298 | 244,645 | 110,560 | 195,489 | 110,805 |
-| put, 256 conns, pipeline 8 | 1,248,956 | 1,257,316 | 884,376 | 911,146 | 615,767 |
-| bulk insert, 64 conns, 100 items | 37,839 | 34,749 | 41,116 | 51,384 | 70,826 |
-| bulk get, 64 conns, 100 items | 25,448 | 44,774 | 59,887 | 49,838 | 74,299 |
+| Workload | C++ uring | Java uring | Java epoll | Java sockets |
+|---|---|---|---|---|
+| get, 256 conns, no pipelining | 251-421k | 267-271k | 217-223k | 73-132k |
+| get, 256 conns, pipeline 8 | 1.04-1.35M | 1.20-1.22M | 0.71-0.94M | 0.53-0.68M |
+| bulk insert, 64 conns, 100 items | 46-60k | 55-65k | 46-50k | 55-56k |
+| bulk get, 64 conns, 100 items | 43-54k | 62-63k | 46-47k | 55-58k |
+| process memory after the run | 20 MB | 349-364 MB | 335-346 MB | 396-400 MB |
 
-Treat this as a smoke test, not a ranking. It is a single run per cell on a machine where the same
-binary varies by up to 2x between runs (the C++ bulk figures here are less than half of what the same
-build measured an hour earlier, see `../bulkapi/RESULTS.md`), and the load generator shares the cores
-with the server. The one pattern that held across workloads is that the C++ server is ahead on small
-single requests.
+- Among the Java backends, `uring` is fastest on every workload and `epoll` is about 20% behind.
+  `sockets` holds up on bulk requests but drops to a quarter to a half of `uring` on small unpipelined
+  requests, with a p99 three to eight times higher (256 connections means 256 threads on 4 cores).
+- Against the C++ server, Java `uring` is level within this machine's noise, at about 18 times the
+  memory. Most of that is the Java heap, sized at 1 GB for the test.
+
+The load generator shares the cores with the server and the same binary varies by up to 2x between runs
+here, so differences under about 1.5x should not be read as real. An earlier single-run table showed
+Java `uring` behind Java `epoll` on small requests; that did not hold over two rounds.

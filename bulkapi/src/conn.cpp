@@ -8,7 +8,7 @@
 
 static thread_local std::vector<Conn*> t_pool;
 
-Conn* conn_new(int fd) {
+Conn* conn_new(int fd, bool own_buffer) {
     Conn* c;
     if (!t_pool.empty()) { c = t_pool.back(); t_pool.pop_back(); }
     else c = new Conn();
@@ -17,7 +17,7 @@ Conn* conn_new(int fd) {
     c->want_close = c->sent100 = c->ep_out = false;
     c->recv_armed = c->recv_cancel = c->sending = c->closing = c->peer_eof = false;
     c->out.clear();
-    if (!c->in) { c->in = (char*)malloc(kInitBuf); c->in_cap = kInitBuf; }
+    if (own_buffer && !c->in) { c->in = (char*)malloc(kInitBuf); c->in_cap = kInitBuf; }
     return c;
 }
 

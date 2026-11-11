@@ -55,6 +55,47 @@ The differences are within the run-to-run spread on this machine (single rounds 
 2.14M req/s on pipelined get), so neither backend is measurably faster here. These runs were taken at
 a different time from the table above and are only comparable with each other.
 
+## No per-connection buffer, no response copy (later change)
+
+Two changes, measured with one server thread (`-t 1`) so that CPU per request is meaningful; the load
+generator (`bench -t 4`) shares the machine. Two rounds each, both shown where they differ.
+
+1. `uring-ms` no longer gives a connection its own input buffer. A request is parsed in place in the
+   shared receive buffer; a private buffer exists only while a request is incomplete or input arrives
+   during a send. Output buffers are borrowed from a per-worker pool while a reply exists.
+2. All backends write a response body once, straight into the output buffer, instead of building it
+   and copying it.
+
+Memory, 20,000 connections that each made one request and then sat idle (process RSS growth):
+
+| Backend | Per connection |
+|---|---|
+| `uring` | 4.33 KB |
+| `uring-ms` before | 4.54 KB |
+| `uring-ms` now | 0.30 KB |
+
+Server CPU per request, get, no pipelining:
+
+| Connections | `uring` | `uring-ms` |
+|---|---|---|
+| 64 | 13-14 us | 15.6-15.8 us |
+| 256 | 8.8-9.8 us | 15.5-19.5 us |
+| 1,000 | 22 us | 15-18 us |
+| 2,000 | 27-28 us | 14.5-14.7 us |
+
+`uring-ms` costs about the same at every connection count; `uring` is cheaper up to a few hundred
+connections and about twice as expensive at 2,000. The same pattern is in the version before this change
+(15.1 us at 256 connections), so it comes from multishot receive itself, not from removing the buffer.
+
+Removing the response copy changed nothing measurable: bulk get of 100 items cost 44.6 and 46.0 us per
+request before and 40.9 and 44.8 after, and bulk get of 1,000 items was unchanged. Responses are
+byte-identical to before on a 34-line probe for all three backends, except that bodies over 4 KB now
+carry a space-padded `Content-Length` header.
+
+`BULKAPI_BATCH_US=N` makes `uring-ms` wait up to N microseconds for more completions when the previous
+turn handled 32 or more. At 200 and 1,000 us it showed no consistent gain at 16, 256 or 2,000
+connections, so it is off by default.
+
 ## Reproduce
 
     make

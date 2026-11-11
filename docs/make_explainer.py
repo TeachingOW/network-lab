@@ -142,7 +142,7 @@ OURS_FLOW = dict(
         ("One SEND goes out as soon as the request is processed, and the kernel copies the bytes "
          "a third time. Then the RECV is armed again.", 1, 1, 1),
     ],
-    idle="16 KB",
+    idle="about 4 KB",
 )
 
 REF_FLOW = dict(
@@ -243,7 +243,7 @@ NARR = {
     "ours.intro": "First, bulk A P I. It runs one thread per core, each with its own ring, and is built "
                   "for requests per second and bulk items per second.",
     "ours.outro": "In total, per request: two submissions, two completions, three copies of the response body, "
-                  "and sixteen kilobytes held for every idle connection.",
+                  "and about four kilobytes of memory held for every idle connection.",
     "ref.intro": "Now the reference. It runs a single thread, and is built to hold about three hundred thousand "
                  "connections on one virtual C P U with two gigabytes of memory.",
     "ref.outro": "In total, per request: two submissions, three completions, two copies of the response body, "
@@ -252,7 +252,7 @@ NARR = {
              "every pipelined request in a single pass. The reference copies the response body one time less, "
              "allocates nothing on the request path, and holds only forty bytes per idle connection.",
     "idle": "Idle connections are where the two designs differ most. For one hundred thousand idle connections, "
-            "ours pins about one point six gigabytes of receive buffers. The reference needs about four megabytes.",
+            "ours holds about four hundred and thirty megabytes of receive buffers. The reference needs about four megabytes.",
     "time": "Where does our C P U time go? For single requests, up to ninety one percent is spent in the kernel, "
             "so tuning our parser or router can gain little. Bulk requests spend most of their time in our own "
             "code. That is where optimising pays.",
@@ -373,7 +373,7 @@ def scene_table():
         ("Completions per request", "2", "3", 0),
         ("Copies of the response body", "3", "2", 1),
         ("Heap allocations on the request path", "yes", "none", 1),
-        ("Memory per idle connection", "16 KB", "40 bytes", 1),
+        ("Memory per idle connection", "about 4 KB", "40 bytes", 1),
         ("Pipelined requests per pass", "all of them", "one", 0),
     ]
 
@@ -402,10 +402,10 @@ def scene_idle():
 
     def render(t):
         c = Canvas()
-        header(c, "What idle connections cost", "User-space memory for 100,000 connections that are doing nothing")
+        header(c, "What idle connections cost", "Server memory for 100,000 idle connections (measured: 4.3 KB each after one request)")
         grow = ease((t - 0.6) / 1.8)
         x0, full = 330, 760
-        for i, (name, col, val, frac) in enumerate([("bulkapi", OURS, "1.6 GB", 1.0), ("reference", REF, "4 MB", 0.0025)]):
+        for i, (name, col, val, frac) in enumerate([("bulkapi", OURS, "about 430 MB", 1.0), ("reference", REF, "4 MB", 0.0093)]):
             y = 200 + i * 130
             c.text(x0 - 24, y + 32, name, 19, col, bold=True, anchor="rm")
             c.rect(x0, y, full, 64, fill=PANEL, outline=None, r=6)
@@ -415,8 +415,8 @@ def scene_idle():
                 inside = frac > 0.5
                 c.text(x0 + (wbar - 16 if inside else wbar + 14), y + 32, val, 22, BG if inside else TEXT, bold=True,
                        anchor="rm" if inside else "lm")
-        c.wrapped(W / 2, 480, "Ours pins a 16 KB receive buffer on every connection. The reference keeps a "
-                  "40-byte record and borrows a shared buffer only while a request is being read.", 19, 1080)
+        c.wrapped(W / 2, 480, "Ours gives every connection its own 16 KB receive buffer, of which about 4 KB stays in memory once "
+                  "used. The reference keeps a 40-byte record and borrows a shared buffer only while reading.", 19, 1080)
         c.wrapped(W / 2, 580, "The kernel's own socket memory, about 4 KB per connection, comes on top for both.",
                   15, 1080, MUTED)
         return c

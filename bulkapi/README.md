@@ -10,7 +10,9 @@ into the server at build time.
     python3 bench/bench.py -m bulk -n 500 -c 16       # simple stdlib version
 
 Backends: `uring` (raw syscalls, single-shot receive; the default, falls back to epoll), `uring-ms`
-(liburing, `io_uring_prep_recv_multishot` into a provided-buffer ring, Linux 6.1+, no fallback) and `epoll`.
+(liburing, `io_uring_prep_recv_multishot` into a provided-buffer ring, Linux 6.1+, no fallback; connections hold
+no buffer while idle and requests are parsed in place in the shared buffer) and `epoll`. `uring-ms` suits
+thousands of connections; `uring` is cheaper per request up to a few hundred (see RESULTS.md).
 The build needs liburing 2.3 or newer; the Makefile explains how to install it and where it looks.
 A Java port with io_uring, epoll and blocking-socket backends is in `../bulkapi-java`.
 

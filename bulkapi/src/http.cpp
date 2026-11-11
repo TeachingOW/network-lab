@@ -2,6 +2,7 @@
 
 #include <strings.h>
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 
@@ -24,19 +25,60 @@ static const char* status_text(int s) {
     }
 }
 
-static void serialize(std::string& o, const Res& r, bool close_after) {
-    o.reserve(o.size() + r.body.size() + 160);
-    o += "HTTP/1.1 "; o += status_text(r.status);
-    o += "\r\nContent-Type: "; o += r.ctype;
-    o += "\r\nContent-Length: "; append_u64(o, r.body.size());
-    o += close_after ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n";
-    o += r.body;
+// Responses are written once. begin_response() leaves kHdr bytes of room, the handler appends the
+// body straight after it, and finish_response() fills the header in. A small body is then moved
+// down against the header; a large one stays where it is and the header is padded with spaces
+// in front of the Content-Length value (optional whitespace, which HTTP allows).
+static constexpr size_t kHdr = 160;
+static constexpr size_t kSmallBody = 4096;
+
+static size_t begin_response(std::string& o) {
+    size_t start = o.size();
+    o.resize(start + kHdr);
+    return start;
 }
 
-static void fail(Conn& c, Worker& w, int status, const char* msg) {
-    w.res.status = 200; w.res.ctype = "application/json"; w.res.body.clear();
-    err(w.res, status, msg);
-    serialize(c.out, w.res, true);
+static void finish_response(std::string& o, size_t start, int status, const char* ctype, bool close_after) {
+    size_t body = o.size() - start - kHdr;
+    const char* st = status_text(status);
+    size_t stl = strlen(st), ctl = strlen(ctype);
+    char d[24];
+    size_t dl = std::to_chars(d, d + sizeof d, body).ptr - d;
+    size_t fixed = 9 + stl + 16 + ctl + 18, tail = dl + (close_after ? 19 : 0) + 4;
+    if (fixed + tail > kHdr) {  // a content type too long for the reserved room: build the header separately
+        std::string h = "HTTP/1.1 ";
+        h.append(st, stl).append("\r\nContent-Type: ").append(ctype, ctl).append("\r\nContent-Length: ").append(d, dl);
+        h += close_after ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n";
+        o.replace(start, kHdr, h);
+        return;
+    }
+    char* h = &o[start];
+    size_t n = 0;
+    auto put = [&](const char* s, size_t len) { memcpy(h + n, s, len); n += len; };
+    put("HTTP/1.1 ", 9);
+    put(st, stl);
+    put("\r\nContent-Type: ", 16);
+    put(ctype, ctl);
+    put("\r\nContent-Length: ", 18);
+    if (body > kSmallBody) {
+        size_t pad = kHdr - fixed - tail;
+        memset(h + n, ' ', pad);
+        n += pad;
+    }
+    put(d, dl);
+    if (close_after) put("\r\nConnection: close", 19);
+    put("\r\n\r\n", 4);
+    if (n < kHdr) {  // small body: close the gap
+        memmove(h + n, h + kHdr, body);
+        o.resize(start + n + body);
+    }
+}
+
+static void fail(Conn& c, Worker&, int status, const char* msg) {
+    size_t start = begin_response(c.out);
+    Res res{200, "application/json", c.out};
+    err(res, status, msg);
+    finish_response(c.out, start, res.status, res.ctype, true);
     c.want_close = true;
 }
 
@@ -114,10 +156,11 @@ void process(Conn& c, Worker& w) {
         Params params;
         int ridx = route_match(parse_method(std::string_view(base, sp1 - base)), path, params);
         if (ridx < 0) {
-            w.res.status = 200; w.res.ctype = "application/json"; w.res.body.clear();
-            err(w.res, ridx == -2 ? 405 : 404, ridx == -2 ? "method not allowed" : "not found");
             bool close_after = !keep_alive || cl > 0;  // don't buffer a body we won't use
-            serialize(c.out, w.res, close_after);
+            size_t start = begin_response(c.out);
+            Res res{200, "application/json", c.out};
+            err(res, ridx == -2 ? 405 : 404, ridx == -2 ? "method not allowed" : "not found");
+            finish_response(c.out, start, res.status, res.ctype, close_after);
             if (close_after) c.want_close = true;
             pos += hlen;
             nreq++;
@@ -134,13 +177,16 @@ void process(Conn& c, Worker& w) {
 
         Req req{parse_method(std::string_view(base, sp1 - base)), path, query,
                 std::string_view(base + hlen, cl), params};
-        Res& res = w.res;
-        res.status = 200; res.ctype = "application/json"; res.body.clear();
+        size_t start = begin_response(c.out);
+        Res res{200, "application/json", c.out};
         try { kRouteHandler[ridx](req, res); }
-        catch (...) { res.body.clear(); err(res, 500, "internal error"); }
-        serialize(c.out, res, !keep_alive);
+        catch (...) {
+            c.out.resize(start + kHdr);  // drop whatever body was written
+            res.ctype = "application/json";
+            err(res, 500, "internal error");
+        }
+        finish_response(c.out, start, res.status, res.ctype, !keep_alive);
         if (!keep_alive) c.want_close = true;
-        if (res.body.capacity() > (1u << 20)) std::string().swap(res.body);
         pos += total;
         nreq++;
     }

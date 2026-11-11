@@ -11,7 +11,6 @@ inline constexpr size_t kBigBuf = 256 * 1024;  // buffers above this are freed w
 
 struct Worker {
     int id = 0, cpu = -1, port = 8080;
-    Res res;  // scratch response, reused across requests
     Stats* st = nullptr;
 };
 
@@ -26,6 +25,7 @@ struct Conn {
     bool recv_armed = false, recv_cancel = false, sending = false, closing = false, peer_eof = false;
 };
 
-Conn* conn_new(int fd);       // takes a Conn from the calling thread's pool
+// Takes a Conn from the calling thread's pool. own_buffer=false leaves it without an input buffer.
+Conn* conn_new(int fd, bool own_buffer = true);
 void conn_free(Conn* c);      // closes the fd and returns the Conn to the pool
 void ensure_room(Conn& c);    // grows c.in so the next read has space
