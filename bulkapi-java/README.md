@@ -58,3 +58,5 @@ Two rounds each, range shown. 4 worker threads, `build/bench -t 4 -d 4 -w 3` on 
 The load generator shares the cores with the server and the same binary varies by up to 2x between runs
 here, so differences under about 1.5x should not be read as real. An earlier single-run table showed
 Java `uring` behind Java `epoll` on small requests; that did not hold over two rounds.
+
+A per-request CPU comparison of all five backends (Java and C++) is in [JAVA_COMPARISON.md](JAVA_COMPARISON.md).
