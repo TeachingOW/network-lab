@@ -1,0 +1,22 @@
+<section id="io-uring" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">What io_uring is</h2>
+<p style="font-size:30px;line-height:1.4;color:#44505C;width:1500px">io_uring is Linux’s interface for asynchronous input and output. The program and the kernel share two queues in memory, so they can exchange many requests without a system call for each one.</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Submission queue</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The program writes what it wants done: accept a connection, receive, send.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Completion queue</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel writes the result of each operation here when it finishes.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">One call for many</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A single system call hands over every queued request and collects every finished one.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">With the older epoll interface every read and every send is its own system call: about twice the kernel time per request here</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">4 / 30</p>
+<aside>Some background before the optimisations. A server spends most of its time asking the kernel to do things: accept a connection, read from a socket, write to one. Each of those is normally a system call, and a system call is expensive compared with ordinary code. io_uring, added to Linux in 2019, replaces most of those calls with two ring-shaped queues that live in memory shared between the program and the kernel. The program puts requests on the submission queue, the kernel puts results on the completion queue, and one call, io_uring_enter, moves a whole batch in each direction. bulkapi also has an epoll backend, the older interface, where the kernel only reports which sockets are ready and the program then makes one call per read and one per send. On the same workloads it cost about twice the kernel time per request.</aside>
+</section>

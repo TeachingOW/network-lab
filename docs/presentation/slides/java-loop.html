@@ -1,0 +1,17 @@
+<section id="java-loop" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background · in Java</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The same loop in Java</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) {<br>&#160;&#160;enter(true);&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// the one native call</span><br>&#160;&#160;int head = cqHead.getInt(0);<br>&#160;&#160;int tail = (int) INT.getAcquire(cqTail, 0);<br>&#160;&#160;while (head != tail) {<br>&#160;&#160;&#160;&#160;int off = (head &amp; cqMask) * cqeSize;<br>&#160;&#160;&#160;&#160;long ud = cqes.getLong(off + oUd);<br>&#160;&#160;&#160;&#160;int res = cqes.getInt(off + oRes);<br>&#160;&#160;&#160;&#160;head++;<br>&#160;&#160;&#160;&#160;Conn c = conns.get((int) (ud &gt;&gt;&gt; OP_BITS));<br>&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// ... a receive or a send finished</span><br>&#160;&#160;}<br>&#160;&#160;INT.setRelease(cqHead, 0, head);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">cqes is the kernel’s completion queue,</b> mapped into Java as a direct ByteBuffer. Java reads results straight out of shared memory.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">enter()</b> is the only call that leaves Java: one per turn, however many requests it covers.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The tag is an index,</b> not a pointer: Java has no addresses, so user_data holds the connection’s position in a list.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from UringBackend.java · liburing sets the ring up through a small JNI shim, native/uring_jni.c</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">6 / 30</p>
+<aside>Java cannot call io_uring directly on JDK 11, so the usual approach is a native call for every operation, which is slow because crossing from Java into native code has a fixed cost. This port avoids that. A small C shim uses liburing once to create the ring and returns the memory addresses of the two queues. Java wraps those addresses as direct byte buffers and from then on reads completions and writes submissions itself, exactly as the C++ code does through pointers. getAcquire and setRelease are the Java equivalents of the atomic loads and stores the kernel expects on the queue’s head and tail. The single remaining native call is io_uring_enter, once per loop turn. The tag on each operation is the connection’s index in a list shifted left by three bits, with the operation type in the low bits, because Java objects have no stable address to store.</aside>
+</section>

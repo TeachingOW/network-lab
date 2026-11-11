@@ -1,0 +1,23 @@
+<section id="one-syscall" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 8 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">One system call per request</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Today.</b> With a single client, the single-shot backend enters the kernel twice per request: once for the receive completion, once for the send completion.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Proposed.</b> Link the send to the next receive and suppress the send’s completion, so one entry covers both.</p>
+</div>
+<div style="width:700px;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Kernel entries per request, 1 client</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">2.0</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Kernel entries per request, 64 clients</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">0.03</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Counted with strace, which inflates batching · the proposal itself is not measured · backend_uring.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">26 / 30</p>
+<aside>This one only matters at low concurrency. Counting system calls showed exactly two io_uring_enter calls per request with a single client, and about 0.03 with 64, because a busy loop already handles many completions per entry. The fix is to submit the send and the following receive as a linked pair, mark the send so it posts no completion on success, and use MSG_WAITALL so a short send becomes an error instead of breaking the link. That halves both the kernel entries and the completions per request in the low-load case. The multishot backend partly has this already, since its receive is never resubmitted. The 64-client figure was taken under strace, which slows the server and makes batching look better than it is.</aside>
+</section>

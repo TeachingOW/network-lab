@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bulkapi optimisations, one by one</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap">
+<style>
+html, body { margin: 0; height: 100%; background: #05080c; overflow: hidden; }
+#stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }
+section { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; }
+section:not(.on) { display: none !important; }
+section * { margin: 0; box-sizing: border-box; }
+section aside { display: none; }
+section p { font-variant-ligatures: none; }  /* show code as typed: -> and != stay two characters */
+section ol, section ul { padding-left: 1.3em; }
+section table { border-collapse: collapse; }
+section table:not([style*="width"]) { width: 100%; }
+section th, section td { padding: 0.35em 0.6em; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(128, 128, 128, 0.28); }
+section tr:last-child td { border-bottom: none; }
+section th { font-weight: 600; }
+#notes { position: fixed; left: 0; right: 0; bottom: 0; max-height: 38%; overflow: auto; display: none; padding: 16px 24px;
+         background: rgba(5, 8, 12, 0.94); color: #e6edf3; font: 18px/1.5 'IBM Plex Sans', Arial, sans-serif; }
+#notes.on { display: block; }
+@page { size: 1920px 1080px; margin: 0; }
+@media print {
+  html, body { height: auto; overflow: visible; background: none; }
+  #stage { position: static; transform: none !important; width: 1920px; height: auto; }
+  section, section:not(.on) { position: relative; display: flex !important; break-after: page; }
+  section[style*="display:grid"] { display: grid !important; }
+  #notes { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="stage">
+<section id="cover" data-transition="fade" style="background:#0F1720;color:#F5F7F9;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;justify-content:space-between;gap:48px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#7FB6FF">bulkapi · io_uring HTTP server</p>
+<div style="display:flex;flex-direction:column;gap:40px">
+<h1 style="font-size:112px;font-weight:600;line-height:1.05">Optimisations,<br>one by one</h1>
+<p style="font-size:40px;line-height:1.3;color:#B9C6D3;width:1300px">What each change does, what it measured, and which ones are still open.</p>
+</div>
+<div style="display:flex;gap:64px">
+<p style="font-size:30px;color:#B9C6D3"><b style="color:#F5F7F9">4</b> implemented</p>
+<p style="font-size:30px;color:#B9C6D3"><b style="color:#F5F7F9">5</b> still open</p>
+<p style="font-size:30px;color:#B9C6D3">Measured on one 4-core laptop</p>
+</div>
+<aside>This deck walks through every optimisation considered for bulkapi, in the order they were looked at. Four are implemented and measured. Five are still open. Every number comes from runs on a single 4-core laptop under WSL2 with the load generator on the same machine, so differences below about 1.5x should not be read as real.</aside>
+</section>
+<section id="baseline" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Starting point</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Where bulkapi’s CPU time goes</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C">Single requests are bound by the kernel. Our parser, router and handler together cost under 1 µs.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk requests spend most of their time in our own code. That is where optimising pays.</p>
+</div>
+<table style="width:960px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:40%;text-align:left">Workload</th><th style="width:20%;text-align:right">Our code</th><th style="width:20%;text-align:right">Kernel</th><th style="width:20%;text-align:right">Kernel share</th></tr>
+<tr><td>GET, no pipelining</td><td>0.62 µs</td><td>6.31 µs</td><td>91%</td></tr>
+<tr><td>GET, pipeline of 8</td><td>0.38 µs</td><td>1.02 µs</td><td>73%</td></tr>
+<tr><td>Bulk insert, 100 items</td><td>13.9 µs</td><td>12.9 µs</td><td>48%</td></tr>
+<tr><td>Bulk get, 100 items</td><td>39.4 µs</td><td>15.9 µs</td><td>29%</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1200px;font-size:24px;color:#5F6B78">CPU per request, io_uring backend, one worker, 64 connections</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">2 / 30</p>
+<aside>Before changing anything, this is the split between time in our own code and time in the kernel, per request, with one worker. For a plain GET the kernel takes 91 percent, so tuning the parser or the router can gain at most a few percent. Bulk requests are different: a bulk get of 100 items spends 39 microseconds in our code against 16 in the kernel. A function-level profile was not available on this machine, so the ranking of ideas rests on this split and on reading the code.</aside>
+</section>
+<section id="method" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Method</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">How each change was measured</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Same answers</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A 34-line probe is run before and after. Responses must be byte-identical, including split packets, pipelining and a 20 MB upload.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">CPU per request</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One server thread, so server CPU time divided by requests is meaningful. Old and new binaries run in alternating rounds.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Honest about noise</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The same binary varies by up to 2x between runs here. A difference under about 1.5x is not treated as real.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1200px;font-size:24px;color:#5F6B78">Intel i5-1145G7, 4 cores, WSL2; load generator on the same machine</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">3 / 30</p>
+<aside>Three rules were applied to every change. First, correctness: the same probe of 34 response lines is run against the old and the new build and must match byte for byte. Second, the metric: with a single server thread, CPU time per request is a cleaner signal than throughput, because the load generator shares the four cores. Third, noise: on this laptop the same binary can swing by a factor of two between runs, so small differences are reported as no measurable change rather than as wins.</aside>
+</section>
+<section id="io-uring" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">What io_uring is</h2>
+<p style="font-size:30px;line-height:1.4;color:#44505C;width:1500px">io_uring is Linux’s interface for asynchronous input and output. The program and the kernel share two queues in memory, so they can exchange many requests without a system call for each one.</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Submission queue</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The program writes what it wants done: accept a connection, receive, send.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Completion queue</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel writes the result of each operation here when it finishes.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">One call for many</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A single system call hands over every queued request and collects every finished one.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">With the older epoll interface every read and every send is its own system call: about twice the kernel time per request here</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">4 / 30</p>
+<aside>Some background before the optimisations. A server spends most of its time asking the kernel to do things: accept a connection, read from a socket, write to one. Each of those is normally a system call, and a system call is expensive compared with ordinary code. io_uring, added to Linux in 2019, replaces most of those calls with two ring-shaped queues that live in memory shared between the program and the kernel. The program puts requests on the submission queue, the kernel puts results on the completion queue, and one call, io_uring_enter, moves a whole batch in each direction. bulkapi also has an epoll backend, the older interface, where the kernel only reports which sockets are ready and the program then makes one call per read and one per send. On the same workloads it cost about twice the kernel time per request.</aside>
+</section>
+<section id="code-loop" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The event loop</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) {<br>&#160;&#160;io_uring_submit_and_wait(&amp;ring, 1);<br>&#160;&#160;io_uring_for_each_cqe(&amp;ring, head, cqe) {<br>&#160;&#160;&#160;&#160;seen++;<br>&#160;&#160;&#160;&#160;u64 op = cqe-&gt;user_data &amp; OP_MASK;<br>&#160;&#160;&#160;&#160;Conn* c = (Conn*)(cqe-&gt;user_data &amp; ~OP_MASK);<br>&#160;&#160;&#160;&#160;if (op == OP_RECV)<br>&#160;&#160;&#160;&#160;&#160;&#160;on_recv(c, cqe-&gt;res, cqe-&gt;flags);<br>&#160;&#160;&#160;&#160;else if (op == OP_SEND)<br>&#160;&#160;&#160;&#160;&#160;&#160;on_send(c, cqe-&gt;res);<br>&#160;&#160;}<br>&#160;&#160;io_uring_cq_advance(&amp;ring, seen);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">One call does both jobs.</b> submit_and_wait hands the kernel everything queued since the last turn, then sleeps until at least one operation has finished.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Each completion says whose it is.</b> user_data is a tag the program attached when it submitted: here the connection’s address, with the operation type in its lowest three bits.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">cq_advance</b> tells the kernel those results have been read.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from backend_uring_ms.cpp (accept handling left out)</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">5 / 30</p>
+<aside>This is the whole server loop, with the accept branch removed for space. Each turn makes one system call. That call submits whatever was queued during the previous turn, such as sends for the replies just produced, and blocks until the kernel has at least one result. The loop then walks the completion queue. A completion is 16 bytes: a result code, some flags, and user_data, a 64-bit value copied back unchanged from the submission. bulkapi stores the connection pointer there. Because the connection object is aligned to at least 8 bytes, its lowest three bits are always zero, so the operation type, receive or send, is packed into them and masked off here. Finally cq_advance moves the queue’s head so the kernel can reuse those slots.</aside>
+</section>
+<section id="java-loop" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background · in Java</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The same loop in Java</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) {<br>&#160;&#160;enter(true);&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// the one native call</span><br>&#160;&#160;int head = cqHead.getInt(0);<br>&#160;&#160;int tail = (int) INT.getAcquire(cqTail, 0);<br>&#160;&#160;while (head != tail) {<br>&#160;&#160;&#160;&#160;int off = (head &amp; cqMask) * cqeSize;<br>&#160;&#160;&#160;&#160;long ud = cqes.getLong(off + oUd);<br>&#160;&#160;&#160;&#160;int res = cqes.getInt(off + oRes);<br>&#160;&#160;&#160;&#160;head++;<br>&#160;&#160;&#160;&#160;Conn c = conns.get((int) (ud &gt;&gt;&gt; OP_BITS));<br>&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// ... a receive or a send finished</span><br>&#160;&#160;}<br>&#160;&#160;INT.setRelease(cqHead, 0, head);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">cqes is the kernel’s completion queue,</b> mapped into Java as a direct ByteBuffer. Java reads results straight out of shared memory.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">enter()</b> is the only call that leaves Java: one per turn, however many requests it covers.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The tag is an index,</b> not a pointer: Java has no addresses, so user_data holds the connection’s position in a list.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from UringBackend.java · liburing sets the ring up through a small JNI shim, native/uring_jni.c</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">6 / 30</p>
+<aside>Java cannot call io_uring directly on JDK 11, so the usual approach is a native call for every operation, which is slow because crossing from Java into native code has a fixed cost. This port avoids that. A small C shim uses liburing once to create the ring and returns the memory addresses of the two queues. Java wraps those addresses as direct byte buffers and from then on reads completions and writes submissions itself, exactly as the C++ code does through pointers. getAcquire and setRelease are the Java equivalents of the atomic loads and stores the kernel expects on the queue’s head and tail. The single remaining native call is io_uring_enter, once per loop turn. The tag on each operation is the connection’s index in a list shifted left by three bits, with the operation type in the low bits, because Java objects have no stable address to store.</aside>
+</section>
+<section id="single-shot" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Single-shot and multishot</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Single-shot</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One submission gives one completion. To receive the next request, the program must submit a new receive.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The program says which buffer to fill, so each connection needs its own.</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#18222D">--backend uring</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Multishot</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One submission stays armed and gives a completion every time data arrives. Nothing is resubmitted.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel picks a buffer from a pool shared by all connections on the thread.</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#1F6FEB">--backend uring-ms</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Accepting connections was multishot in both backends from the start; the difference is in receiving</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">7 / 30</p>
+<aside>These two words describe how long a submission lasts. A single-shot operation is used up by its first result: submit one receive, get one completion, and submit again for the next request. Because the program names the buffer when it submits, each connection needs a buffer of its own waiting to be filled. A multishot operation stays in place after it completes. One receive is submitted when the connection opens, and from then on the kernel posts a completion each time data arrives. Since the program is not there to name a buffer each time, the kernel takes one from a ring of buffers the program registered in advance, shared by every connection on that thread. That sharing is what makes the memory saving on the next slides possible. bulkapi has one backend of each kind.</aside>
+</section>
+<section id="ms-recv" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 1 · implemented</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Multishot receive</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> One receive is armed per connection and keeps delivering data into a shared ring of buffers. Before, a receive was submitted again after every request.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> Cost per request stays flat as connections grow. It is cheaper than single-shot at 2,000 connections and dearer at 256.</p>
+</div>
+<table style="width:820px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:34%;text-align:left">Connections</th><th style="width:33%;text-align:right">Single-shot</th><th style="width:33%;text-align:right">Multishot</th></tr>
+<tr><td>256</td><td>8.8–9.8 µs</td><td>15.5–19.5 µs</td></tr>
+<tr><td>1,000</td><td>22 µs</td><td>15–18 µs</td></tr>
+<tr><td>2,000</td><td>27–28 µs</td><td>14.5–14.7 µs</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request, GET, no pipelining, one thread · --backend uring-ms</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">8 / 30</p>
+<aside>The first implemented change is a second io_uring backend, selected with backend uring-ms. It uses io_uring_prep_recv_multishot from liburing 2.15: one submission per connection, and the kernel posts a completion for each chunk of data into a buffer taken from a shared ring of 1,024 buffers of 16 kilobytes. The measured effect is a trade-off, not a plain win. Multishot costs about 15 microseconds per request whatever the connection count. Single-shot costs about 9 at 256 connections but 27 at 2,000. So multishot is the backend for thousands of connections and single-shot for a few hundred or fewer. Why single-shot degrades with connection count has not been established.</aside>
+</section>
+<section id="code-ms" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 1 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Arming a multishot receive</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">void prep_recv_multishot(Conn* c) {<br>&#160;&#160;io_uring_sqe* e = sqe();<br>&#160;&#160;io_uring_prep_recv_multishot(<br>&#160;&#160;&#160;&#160;&#160;&#160;e, c-&gt;fd, nullptr, 0, 0);<br>&#160;&#160;e-&gt;flags |= IOSQE_BUFFER_SELECT;<br>&#160;&#160;e-&gt;buf_group = kBufGroup;<br>&#160;&#160;io_uring_sqe_set_data64(e, (u64)c | OP_RECV);<br>&#160;&#160;c-&gt;recv_armed = true;<br>}<br><br><span style="color:#8FA3B8">// later, on each completion</span><br>if (!(flags &amp; IORING_CQE_F_MORE))<br>&#160;&#160;c-&gt;recv_armed = false;</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">No buffer is named.</b> The buffer argument is null and the length is 0. The kernel will choose a buffer each time data arrives.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">BUFFER_SELECT and buf_group</b> say which shared pool to take that buffer from.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">F_MORE</b> on a completion means the receive is still armed. When it is missing, for example because the pool ran dry, the loop arms it again.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From backend_uring_ms.cpp · io_uring_prep_recv_multishot needs liburing 2.3 or newer and Linux 6.0 or newer</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">9 / 30</p>
+<aside>This function runs once when a connection is accepted. sqe() returns the next free slot on the submission queue. io_uring_prep_recv_multishot fills it in as a receive that stays armed. Unlike a normal receive, it is given no buffer and a length of zero, because the program will not be there to supply one for each arrival. The two lines after it tell the kernel to pick a buffer from buffer group zero, the ring of 1,024 buffers this worker registered at startup. The tag is the connection pointer with the receive marker. On the way back, every completion carries a flag called F_MORE while the operation remains armed. If a completion arrives without it, the multishot has ended, which happens when the buffer pool is empty or on an error, and the connection is put on a list to be armed again at the end of the turn.</aside>
+</section>
+<section id="no-buffer" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 2 · implemented</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">No buffer per connection</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> A request is parsed in place in the shared receive buffer, with no copy. A private buffer exists only while a request is incomplete, and is freed after.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> Memory per idle connection fell 14-fold. Speed is unchanged.</p>
+</div>
+<div style="width:760px;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Before, per idle connection</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">4.54 KB</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">After, per idle connection</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#1F6FEB">0.30 KB</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Process memory growth, 20,000 connections idle after one request each · --backend uring-ms</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">10 / 30</p>
+<aside>The multishot backend already received into shared buffers, but it copied every request into a 16 kilobyte buffer owned by the connection. Now the request is parsed directly in the shared buffer. Only two cases still need a private buffer: a request that has not fully arrived, and input that arrives while a reply is being sent. That buffer is freed as soon as it is drained. Output buffers are borrowed from a per-worker pool only while a reply exists. Measured with 20,000 connections that each made one request and then sat idle, memory per connection went from 4.54 kilobytes to 0.30. The single-shot backend still holds 4.33 kilobytes. An earlier estimate of 16 kilobytes per connection was wrong: only the touched part of each buffer stays in memory.</aside>
+</section>
+<section id="memory" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 2 · how it works</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">How the memory was reduced</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">1. The cost before</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Every connection owned a 16 KB buffer. Memory comes in 4 KB pages, and the first page is in use as soon as the buffer exists: 4 KB per connection.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">2. Share the buffers</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Data now lands in a pool of 1,024 buffers per thread. The pool costs about 4 MB once, however many connections there are.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">3. Read it in place</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The request is handled straight from the shared buffer, which is then handed back. The connection keeps only a record of about 95 bytes.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A private buffer is still created when a request arrives in pieces, and is freed once the request is complete.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Opening 20,000 connections added 80 MB before and 1.9 MB after · the kernel’s own 4 KB per socket is unchanged</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">11 / 30</p>
+<aside>This slide explains the mechanism behind the previous number. The operating system gives out memory in pages of 4 kilobytes and only counts a page once something is written to it. Allocating a 16 kilobyte buffer writes a small bookkeeping header at its start, so the first page is in use immediately, and a small request lands in the same page. That is why each connection cost about 4 kilobytes, not 16. The fix has two parts. First, with multishot receive the kernel fills buffers from a shared pool, 1,024 buffers per thread; touching one page of each is about 4 megabytes, a fixed cost. Second, the server no longer copies the request out of that shared buffer: it parses it where it is and returns the buffer straight away. What remains per connection is a small record. The measurement: opening 20,000 connections added 80 megabytes before and 1.9 megabytes after, about 95 bytes each. The reference server reaches the same place a different way, with a 40-byte record in a table allocated at startup. None of this changes the kernel’s own memory, roughly 4 kilobytes per open socket.</aside>
+</section>
+<section id="code-inplace" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 2 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Parsing in the shared buffer</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">void feed(Conn* c, char* p, size_t n) {<br>&#160;&#160;if (c-&gt;in_len || c-&gt;sending) {<br>&#160;&#160;&#160;&#160;stash(c, p, n);&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// keep a copy</span><br>&#160;&#160;&#160;&#160;if (!c-&gt;sending) run(c);<br>&#160;&#160;&#160;&#160;return;<br>&#160;&#160;}<br>&#160;&#160;c-&gt;in = p;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// parse in place</span><br>&#160;&#160;c-&gt;in_cap = c-&gt;in_len = n;<br>&#160;&#160;process(*c, w);<br>&#160;&#160;size_t left = c-&gt;in_len;<br>&#160;&#160;c-&gt;in = nullptr;<br>&#160;&#160;c-&gt;in_cap = c-&gt;in_len = 0;<br>&#160;&#160;if (left) stash(c, p, left);<br>&#160;&#160;after_process(c);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">p is the kernel’s shared buffer.</b> In the common case the connection simply points at it, the request is handled, and the pointer is cleared. Nothing is copied.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">left</b> is what remains of an incomplete request. Only that is copied to a private buffer.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The first branch</b> covers a connection that already holds input or is mid-reply: its bytes must be kept, because p goes back to the kernel on return.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from backend_uring_ms.cpp (output-buffer pooling and backpressure left out)</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">12 / 30</p>
+<aside>feed is called for every chunk of data the kernel delivers, with a pointer into one of the shared buffers and a length. The parser, process, works on whatever the connection’s in pointer refers to, so the trick is to aim that pointer at the shared buffer for the length of one call. process handles every complete request it finds and moves any incomplete remainder to the front. Afterwards the connection lets go of the buffer. If something was left over, a request whose body has not all arrived, stash copies just that part into a heap buffer sized for the whole request, and later chunks are appended to it. The top branch is the other case where a copy is unavoidable: the connection already has saved input, or a reply is still being sent and the output buffer cannot be appended to, so the new bytes are saved for after the send. The caller returns the shared buffer to the kernel as soon as feed returns, which is why nothing may keep pointing into it.</aside>
+</section>
+<section id="write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · implemented, no measurable gain</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Write each response once</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> Handlers append the body straight into the output buffer after a reserved gap, and the header is filled in afterwards. Before, the body was built separately and then copied.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> The copy is gone, but it was not where the time went.</p>
+</div>
+<table style="width:820px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:40%;text-align:left">Bulk get</th><th style="width:30%;text-align:right">Before</th><th style="width:30%;text-align:right">After</th></tr>
+<tr><td>100 items, run 1</td><td>44.6 µs</td><td>40.9 µs</td></tr>
+<tr><td>100 items, run 2</td><td>46.0 µs</td><td>44.8 µs</td></tr>
+<tr><td>1,000 items</td><td>344–363 µs</td><td>347 µs</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request, one thread · all three backends · http.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">13 / 30</p>
+<aside>The reference server writes each response body once into its arena and places the headers in front of it. bulkapi built the body in a scratch string and then copied it into the connection’s output buffer. That copy is now removed for all three backends. A handler writes its body directly after a 160-byte gap. Small bodies, up to 4 kilobytes, are then moved down against the header. Larger bodies stay where they are and the header is padded with spaces in front of the Content-Length value, which HTTP allows. Responses are otherwise byte-identical to before. The measured effect is nothing beyond noise: about 45 microseconds per bulk get of 100 items before and after. This was first on the earlier list of expected gains, and the measurement says it should not have been.</aside>
+</section>
+<section id="code-write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Body first, header afterwards</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">size_t start = begin_response(c.out);<br>Res res{200, "application/json", c.out};<br>kRouteHandler[ridx](req, res);<br>finish_response(c.out, start, res.status,<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;res.ctype, !keep_alive);<br><br><span style="color:#8FA3B8">// inside finish_response</span><br>if (body &gt; kSmallBody) {<br>&#160;&#160;memset(h + n, ' ', pad);&#160;&#160;<span style="color:#8FA3B8">// pad the header</span><br>&#160;&#160;n += pad;<br>}<br>if (n &lt; kHdr) {&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// close the gap</span><br>&#160;&#160;memmove(h + n, h + kHdr, body);<br>&#160;&#160;o.resize(start + n + body);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">begin_response</b> leaves a 160-byte gap in the output buffer. The handler’s body lands right after it, because res.body <i>is</i> the output buffer.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Large body (over 4 KB):</b> it stays put. The header is padded with spaces so it fills the gap exactly.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Small body:</b> it is moved down against the header. Copying a few bytes is cheaper than sending 90 spaces.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from http.cpp · the padding goes in front of the Content-Length value, which HTTP permits</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">14 / 30</p>
+<aside>The difficulty with writing a response once is that the header contains the body’s length, which is not known until the body is finished. The top four lines show the approach. begin_response reserves 160 bytes and returns where they start. The response object handed to the handler holds a reference to the connection’s output buffer, so every append the handler makes goes directly into place. finish_response then builds the header. For a body larger than 4 kilobytes, it fills the unused part of the gap with spaces placed before the Content-Length number, which the HTTP grammar allows as optional whitespace, so the body never moves. For a small body it writes a normal compact header and slides the body down to meet it, since moving a few hundred bytes costs less than transmitting the padding on every small reply. The handlers themselves did not have to change.</aside>
+</section>
+<section id="java-write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · in Java</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Body first, in Java</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">int start = out.begin();<br>route.handler.handle(w, out);<br>out.finish(start, w.status, w.ctype, !keepAlive);<br><br><span style="color:#8FA3B8">// inside Out.finish</span><br>boolean small = bodyLen &lt;= SMALL;<br>if (!small)&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// pad the header</span><br>&#160;&#160;for (; pad &gt; 0; pad--) h[n++] = ' ';<br>b.position(start);<br>b.put(h, 0, n);<br>if (small) {&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// close the gap</span><br>&#160;&#160;ByteBuffer src = b.duplicate();<br>&#160;&#160;src.limit(end).position(bodyStart);<br>&#160;&#160;b.put(src);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Same design as the C++ change.</b> The handler writes into the output buffer after a 160-byte gap, and the header is filled in afterwards.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The buffer is off-heap.</b> b is a direct ByteBuffer, so the kernel sends from it without an extra copy out of the Java heap.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">b.put(src)</b> on a view of the same buffer is Java’s way to move the small body down.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from Http.java and Out.java · the Java port was written this way from the start</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">15 / 30</p>
+<aside>The Java port had this design from its first version, and the C++ change copied it. The three lines at the top are the whole of it from the request handler’s point of view: reserve room, let the handler append, then finish. Inside finish, the header is assembled in a small reusable byte array. For a body over 4 kilobytes the spare room in the gap is filled with spaces before the length digits, so the body is never moved. For a small body the header is written compactly and the body is slid down to meet it. In Java that move is expressed by taking a second view of the same buffer with duplicate, limiting it to the body’s range, and putting it back into the buffer at the earlier position; for a direct buffer this becomes a single overlapping memory move. Using a direct buffer matters in Java: writing a heap array to a socket makes the runtime copy it off-heap first.</aside>
+</section>
+<section id="batching" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 4 · implemented, off by default</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Batching under high load</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> When the previous loop turn handled 32 or more completions, the loop can wait a short time for more instead of waking for the first one.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> No consistent gain at any load tried. A busy loop already picks up many completions per wake-up.</p>
+</div>
+<table style="width:860px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:31%;text-align:left">Connections</th><th style="width:23%;text-align:right">Off</th><th style="width:23%;text-align:right">200 µs</th><th style="width:23%;text-align:right">1,000 µs</th></tr>
+<tr><td>16</td><td>19–20</td><td>17.5</td><td>18</td></tr>
+<tr><td>256</td><td>14–15</td><td>13–14</td><td>14–17</td></tr>
+<tr><td>2,000</td><td>14–16</td><td>14–20</td><td>15–16</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request in µs, GET, one thread · BULKAPI_BATCH_US, uring-ms backend</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">16 / 30</p>
+<aside>The reference waits for 64 completions or 2 milliseconds before each batch. That helps it at high connection counts and costs it a 2 millisecond floor at low ones: with 16 connections it managed 6,500 requests per second against 59,000 for bulkapi. So bulkapi got a load-adaptive version: it only waits when the previous turn was busy, for half as many completions again, up to a time limit set by the BULKAPI_BATCH_US environment variable. With limits of 200 and 1,000 microseconds, CPU per request did not move consistently at 16, 256 or 2,000 connections. The option stays in the code, switched off by default. It may behave differently on a machine where the load generator does not share the cores.</aside>
+</section>
+<section id="code-batching" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 4 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Waiting longer only when busy</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">if (batch_us &gt; 0 &amp;&amp; last &gt;= kBusy) {<br>&#160;&#160;__kernel_timespec ts{0, batch_us * 1000};<br>&#160;&#160;rc = io_uring_submit_and_wait_timeout(<br>&#160;&#160;&#160;&#160;&#160;&#160;&amp;L.ring, &amp;cqe,<br>&#160;&#160;&#160;&#160;&#160;&#160;std::min(last / 2, 64u),<br>&#160;&#160;&#160;&#160;&#160;&#160;&amp;ts, nullptr);<br>} else {<br>&#160;&#160;rc = io_uring_submit_and_wait(&amp;L.ring, 1);<br>}<br><br><span style="color:#8FA3B8">// after the completions are handled</span><br>last = seen;</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">last</b> is how many completions the previous turn handled. kBusy is 32: fewer than that and the loop wakes for the first completion, as before.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">When busy,</b> it asks for half as many again, at most 64, and gives up waiting after batch_us microseconds.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The reference</b> always waits for 64 completions or 2 ms once a turn has seen 8, which is what costs it at low connection counts.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From backend_uring_ms.cpp · batch_us comes from the BULKAPI_BATCH_US environment variable and defaults to 0, which is off</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">17 / 30</p>
+<aside>Batching means letting several completions accumulate before waking the server thread, so that each wake-up does more work. The risk is latency: a request that arrives alone waits for company that never comes. This code only takes that risk when the previous turn was already busy. If the last turn handled 32 or more completions, the loop asks the kernel to wait for half that number, capped at 64, with a time limit. Otherwise it behaves exactly as before and wakes on the first completion. The reference applies its batching much earlier, once a turn has seen 8 completions, and with a 2 millisecond limit; that is why it handled 6,500 requests per second with 16 connections against bulkapi’s 59,000. In the measurements this adaptive version neither helped nor hurt, so it is switched off unless the environment variable is set.</aside>
+</section>
+<section id="evidence" data-transition="fade" style="background:#0F1720;color:#F5F7F9;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#7FB6FF">Evidence for what comes next</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Against the reference without its database</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#B9C6D3">bulkapi wins at low connection counts and on pipelining, by 6x to 11x.</p>
+<p style="font-size:30px;line-height:1.4;color:#B9C6D3">The reference still wins at 2,000 connections and on bulk get. Those two gaps are what the open optimisations target.</p>
+</div>
+<table style="width:980px;font-size:28px;color:#F5F7F9;background:#18232F;border:1px solid #33414F;border-radius:16px">
+<tr><th style="width:34%;text-align:left">Requests per second</th><th style="width:22%;text-align:right">Reference</th><th style="width:22%;text-align:right">uring</th><th style="width:22%;text-align:right">uring-ms</th></tr>
+<tr><td>GET, 16 connections</td><td>6.5k</td><td>74k</td><td>51–72k</td></tr>
+<tr><td>GET, 256 connections</td><td>84k</td><td>82k</td><td>63k</td></tr>
+<tr><td>GET, 2,000 connections</td><td>62k</td><td>30k</td><td>46k</td></tr>
+<tr><td>GET, pipeline of 8</td><td>66k</td><td>390–640k</td><td>410–440k</td></tr>
+<tr><td>Bulk get, 100 items</td><td>36k</td><td>22k</td><td>13–19k</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#93A3B3">All three single-threaded, same session, two rounds · reference-nodb is the reference minus SQLite and JWT</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#93A3B3">18 / 30</p>
+<aside>To compare event loops without the database in the way, the reference was rebuilt with SQLite, its B-tree read paths, the group commit and JWT removed, serving bulkapi’s API from an in-memory table. This table is a same-session rerun against both current bulkapi backends, each limited to one thread. bulkapi is far ahead with 16 connections, because the reference waits up to 2 milliseconds per batch, and on pipelined requests, because the reference answers one request per connection per batch. At 256 connections they are level. The reference is ahead at 2,000 connections, at about 14 to 15 microseconds of CPU per request against 20 to 25 for uring-ms in this run, and on bulk get, at about 27 to 35 microseconds against 42 to 45. Its bulk get path differs from ours in three ways: a store with no locks, JSON escaping 16 bytes at a time, and a response written once. The third is now done and did not close the gap, which points at the store and the escaping.</aside>
+</section>
+<section id="java" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Three Java backends compared</h2>
+<table style="font-size:27px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:28%;text-align:left">Requests per second</th><th style="width:18%;text-align:right">C++ uring</th><th style="width:18%;text-align:right">Java uring</th><th style="width:18%;text-align:right">Java epoll</th><th style="width:18%;text-align:right">Java sockets</th></tr>
+<tr><td>GET, no pipelining</td><td>251–421k</td><td>267–271k</td><td>217–223k</td><td>73–132k</td></tr>
+<tr><td>GET, pipeline of 8</td><td>1.04–1.35M</td><td>1.20–1.22M</td><td>0.71–0.94M</td><td>0.53–0.68M</td></tr>
+<tr><td>Bulk insert, 100 items</td><td>46–60k</td><td>55–65k</td><td>46–50k</td><td>55–56k</td></tr>
+<tr><td>Bulk get, 100 items</td><td>43–54k</td><td>62–63k</td><td>46–47k</td><td>55–58k</td></tr>
+<tr><td>Memory after the run</td><td>20 MB</td><td>349–364 MB</td><td>335–346 MB</td><td>396–400 MB</td></tr>
+</table>
+<div style="display:flex;gap:48px">
+<p style="flex:1;font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Among the Java backends,</b> io_uring is fastest on every workload, epoll is about 20% behind, and blocking sockets fall furthest behind on small requests.</p>
+<p style="flex:1;font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Against C++,</b> Java io_uring is level within this machine’s noise, at about 18 times the memory.</p>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Two rounds, range shown · 4 threads, 256 connections (64 for bulk) · JDK 11, 1 GB starting heap · 0 errors</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">19 / 30</p>
+<aside>The Java port serves the same API from the same spec file, with three ways of doing input and output. The io_uring backend uses a small native shim to set the ring up, and then Java reads and writes the two queues directly in shared memory, so the only native call per loop turn is io_uring_enter. The epoll backend uses Java’s selectors, which are epoll on Linux, one per thread. The sockets backend is the simplest: a blocking socket and one pooled thread per connection. Among the three, io_uring leads everywhere. Epoll is about a fifth behind. Blocking sockets do well on bulk requests, where the work per request is large, but fall to between a quarter and a half of io_uring on small unpipelined requests, with a worst-case latency three to eight times higher, because 256 connections means 256 threads competing for four cores. Compared with the C++ server, Java io_uring is within noise on throughput. It already has two of the open C++ optimisations, an open-addressing store and a response written once. The clear cost is memory: about 350 megabytes against 20, most of it the Java heap that was sized at 1 gigabyte for the test.</aside>
+</section>
+<section id="java-epoll" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Java epoll backend</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) sel.select(this::onKey);<br><br>private void onKey(SelectionKey key) {<br>&#160;&#160;Conn c = (Conn) key.attachment();<br>&#160;&#160;if (c == null) { accept(); return; }<br>&#160;&#160;c.ensureRoom();<br>&#160;&#160;ByteBuffer in = c.in;<br>&#160;&#160;in.limit(in.capacity()).position(c.inLen);<br>&#160;&#160;int n = c.ch.read(in);<br>&#160;&#160;if (n &lt; 0) { drop(c); return; }<br>&#160;&#160;c.inLen += n;<br>&#160;&#160;Http.process(c, w);<br>&#160;&#160;if (flush(c)) return;<br>&#160;&#160;c.writing = true;<br>&#160;&#160;key.interestOps(SelectionKey.OP_WRITE);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">A Selector is epoll.</b> On Linux, Java’s selector is built on it. It reports which sockets are ready; the program then reads and writes them itself.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">select(this::onKey)</b> calls the method for each ready socket without building a set of keys first.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">OP_WRITE</b> is requested only when a reply does not fit in the socket in one go.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from EpollBackend.java (the write-ready branch and error handling left out) · one selector per thread</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">20 / 30</p>
+<aside>This is the readiness model, the one io_uring replaces. The selector tells the thread that a socket has data, and the thread then makes its own read call and its own write call: two system calls per request plus the wait, against io_uring’s shared queues. Each worker thread has its own selector and its own listening socket on the same port, so the kernel spreads new connections across threads and no connection is ever touched by two threads. Two details keep it lean. The form of select that takes a callback avoids allocating and clearing a set of ready keys on every turn. And the connection is only registered for write readiness when a reply could not be written in full, which is rare; in the normal case the reply is written straight after the request is handled. The read goes into a direct buffer at the position after any bytes already held.</aside>
+</section>
+<section id="java-sockets" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Java blocking-sockets backend</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">while (!c.wantClose) {<br>&#160;&#160;c.ensureRoom();<br>&#160;&#160;ByteBuffer in = c.in;<br>&#160;&#160;in.limit(in.capacity()).position(c.inLen);<br>&#160;&#160;int n = ch.read(in);&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// blocks this thread</span><br>&#160;&#160;if (n &lt; 0) break;<br>&#160;&#160;c.inLen += n;<br>&#160;&#160;Http.process(c, w);<br>&#160;&#160;ByteBuffer b = c.out.b;<br>&#160;&#160;if (b.position() == 0) continue;<br>&#160;&#160;b.flip();<br>&#160;&#160;while (b.hasRemaining()) ch.write(b);<br>&#160;&#160;c.out.clear();<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">One thread per connection.</b> The thread sleeps inside read() until the client sends something. There is no event loop at all.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The same parser.</b> Http.process is shared by all three Java backends; only the way bytes arrive and leave differs.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The cost:</b> 256 connections means 256 threads competing for 4 cores, which is why it falls behind on small requests.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from SocketsBackend.java · threads come from a cached pool, so they are reused across connections</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">21 / 30</p>
+<aside>This is the simplest possible server and the one most Java code was written as for years. Each accepted connection is handed to a thread from a pool, and that thread runs this loop until the connection closes: block in read, handle whatever complete requests arrived, write the replies, repeat. It needs no selector, no queue and no state machine, because the thread’s own stack holds the state. It does well on bulk requests, where the work per request is large compared with the cost of waking a thread. It does badly on many small requests: with 256 connections there are 256 threads, the operating system has to switch between them on four cores, and worst-case latency was three to eight times that of the io_uring backend. On a newer JDK, virtual threads would remove much of that cost while keeping this code almost unchanged; only JDK 11 is installed here.</aside>
+</section>
+<section id="java-store" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The store the C++ server should copy</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">private long[] keys = new long[16];<br>private byte[][] vals = new byte[16][];<br><br>byte[] get(long k) {<br>&#160;&#160;int m = keys.length - 1;<br>&#160;&#160;for (int i = slot(k, m); vals[i] != null;<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;i = (i + 1) &amp; m)<br>&#160;&#160;&#160;&#160;if (keys[i] == k) return vals[i];<br>&#160;&#160;return null;<br>}<br><br>private int slot(long k, int mask) {<br>&#160;&#160;return (int) ((k * MIX) &gt;&gt;&gt; 20) &amp; mask;<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Two flat arrays.</b> Keys are plain 64-bit numbers side by side, with no object and no pointer per entry. A null value marks an empty slot.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">A lookup walks forward</b> from the key’s home slot until it finds the key or an empty slot. Neighbouring slots share a cache line.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">This is optimisation 5,</b> already built here. The C++ server still uses a node-based map.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From Store.java · 256 such shards, each locked separately · Java bulk get measured 62–63k req/s against C++ 43–54k</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">22 / 30</p>
+<aside>This is one shard of the Java store. Java’s built-in HashMap would box every 64-bit key into an object and wrap every entry in a node, which is the same shape of cost as the C++ unordered map. Instead the shard keeps keys in a long array and values in an array of byte arrays. To find a key, it multiplies by a large odd constant to scramble the bits, takes some of the high bits as a starting slot, and steps forward one slot at a time. Because the keys sit next to each other in memory, a short walk usually stays within one cache line. Insertion uses the same walk and doubles the arrays when they are three-quarters full; deletion shifts later entries back so walks never hit a false gap. This is exactly what the next slide proposes for the C++ server. In the two-round benchmark the Java io_uring backend did 62 to 63 thousand bulk gets per second against 43 to 54 thousand for C++, which is suggestive but not proof, since the two differ in other ways too.</aside>
+</section>
+<section id="store" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 5 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Replace the store’s hash map</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Each shard is a <span style="color:#18222D">std::unordered_map</span>. Every new item allocates a node, and every lookup follows a pointer to it.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">An open-addressing table: keys and values in flat arrays, no node per entry, short values stored inline.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Why expect a gain</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The reference and the Java port both use this layout. The reference’s bulk get costs about 30 µs against our 43.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · store.h</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">23 / 30</p>
+<aside>This is now the first open item. The store is 256 shards, each a standard unordered map from a 64-bit id to a string. That container allocates one heap node per item and reaches each item through a pointer, so a bulk request of 100 items pays 100 allocations on insert and 100 cache misses on lookup. An open-addressing table keeps keys and values in flat arrays. Both the stripped reference and the Java port already use that layout. The expected gain is on the bulk endpoints, where our own code is 50 to 70 percent of the cost. No number is claimed: this has not been built or measured for the C++ server.</aside>
+</section>
+<section id="shard-lock" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 6 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Lock once per shard, not per item</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A bulk request of 100 items takes and releases a spinlock 100 times, once for each item.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Group the batch by shard first, then take each shard’s lock once and handle all of its items together.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Trade-off</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk get must still return items in request order, so grouping needs a second pass. It pays most with several threads.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · handlers.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">24 / 30</p>
+<aside>The bulk handlers lock and unlock a shard for every single item. With one thread the locks are never contended, so each costs only two atomic operations, but with four threads working on the same shards they start to bounce cache lines between cores. Grouping a batch by shard means at most one lock per shard touched. The cost is that bulk get has to produce output in the order the ids were given, so the lookups would be done grouped and the results written in a second pass. The reference avoids the question entirely by having one thread own the store. This is expected to matter more as thread count goes up, and has not been measured.</aside>
+</section>
+<section id="json" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 7 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Faster JSON output</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Escaping checks one byte at a time, and each item is built from several small appends that may each regrow the buffer.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Scan 16 bytes at a time for a character that needs escaping, copy clean runs in one go, and reserve the response size up front.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Why expect a gain</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk get is 70% our own code, and its output is almost all escaped values. The reference already scans 16 bytes at a time.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · json.cpp, handlers.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">25 / 30</p>
+<aside>Every value returned by a get or a bulk get passes through json_escape, which tests each byte for a quote, a backslash or a control character. Almost every byte passes, so the work is a long run of checks that find nothing. The reference tests 16 bytes at once using compiler vector extensions and copies the whole clean run with one memcpy. The second half of this item is reserving the output size before a bulk get starts, since the number of ids is known, so the output buffer does not regrow many times. With the response copy now gone and no gain seen from it, this and the store are the two remaining differences between our bulk get path and the reference’s.</aside>
+</section>
+<section id="one-syscall" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 8 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">One system call per request</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Today.</b> With a single client, the single-shot backend enters the kernel twice per request: once for the receive completion, once for the send completion.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Proposed.</b> Link the send to the next receive and suppress the send’s completion, so one entry covers both.</p>
+</div>
+<div style="width:700px;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Kernel entries per request, 1 client</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">2.0</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Kernel entries per request, 64 clients</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">0.03</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Counted with strace, which inflates batching · the proposal itself is not measured · backend_uring.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">26 / 30</p>
+<aside>This one only matters at low concurrency. Counting system calls showed exactly two io_uring_enter calls per request with a single client, and about 0.03 with 64, because a busy loop already handles many completions per entry. The fix is to submit the send and the following receive as a linked pair, mark the send so it posts no completion on success, and use MSG_WAITALL so a short send becomes an error instead of breaking the link. That halves both the kernel entries and the completions per request in the low-load case. The multishot backend partly has this already, since its receive is never resubmitted. The 64-client figure was taken under strace, which slows the server and makes batching look better than it is.</aside>
+</section>
+<section id="kernel" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 9 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Less kernel work per operation</h2>
+<table style="font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:26%;text-align:left">Change</th><th style="width:44%;text-align:left">What it saves</th><th style="width:30%;text-align:left">Where it helps</th></tr>
+<tr><td>Direct descriptors</td><td>A file-table lookup on every receive and send</td><td>Every request</td></tr>
+<tr><td>Registered ring</td><td>A file lookup on every kernel entry</td><td>Low concurrency</td></tr>
+<tr><td>No-delay on the listener</td><td>One system call per accepted connection</td><td>Short-lived connections</td></tr>
+<tr><td>Zero-copy send</td><td>The copy of the response into the kernel</td><td>Large responses, not loopback</td></tr>
+<tr><td>Idle timeout</td><td>Memory held by dead or stalled clients</td><td>Many connections</td></tr>
+</table>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel is 73–91% of the cost of a small request, so this is the only route to a faster single GET. Each item is small, and none has been measured here.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · the reference uses the first three and the last</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">27 / 30</p>
+<aside>These are grouped because each is a small saving inside the kernel. Direct descriptors mean accepted sockets live in a table registered with the ring, so each operation skips looking the file up and taking a reference on it. Registering the ring’s own descriptor does the same for io_uring_enter. Setting TCP no-delay once on the listening socket, which accepted sockets inherit, removes a setsockopt call per connection. Zero-copy send avoids copying a response into the kernel, but it only pays above roughly ten kilobytes and gives nothing over loopback, which is how everything here was measured. The idle timeout is not about speed: bulkapi never closes a stalled connection, and the reference closes them after 90 seconds. Direct descriptors need a linked cancel, shutdown and close sequence, which makes the close path more complex.</aside>
+</section>
+<section id="correctness" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Before more speed · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Three defects to fix first</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Unicode escapes corrupt data</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Inserting “café” stores “cafu00e9”. The backslash is dropped. The Java port and the reference decode it correctly.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Allocations are unchecked</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A failed allocation for a 64 MB body is a crash. The reference checks every one.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Header values are not trimmed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A Content-Length with a trailing space is answered 400. The Java port and the reference accept it.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">All three confirmed against the running C++ server · json.cpp, conn.cpp, http.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">28 / 30</p>
+<aside>None of these is an optimisation, but the first one matters more than any of them. The bulk insert reader treats a backslash-u escape as an unknown escape and keeps only the letter u, so any non-ASCII text sent in escaped form is silently stored wrong. It was confirmed by inserting a value and reading it back. The second is that malloc and realloc results are never checked, in three places. The third is a small protocol strictness: a header value with trailing whitespace is rejected. The Java port fixes the first and third, which is why it differs from the C++ server on exactly two probe lines. There are also no automated tests; every check in this deck was a probe run by hand.</aside>
+</section>
+<section id="summary" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Summary</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Every optimisation and its status</h2>
+<table style="font-size:26px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:4%;text-align:left">#</th><th style="width:32%;text-align:left">Optimisation</th><th style="width:16%;text-align:left">Status</th><th style="width:48%;text-align:left">Measured effect</th></tr>
+<tr><td>1</td><td>Multishot receive</td><td>Done</td><td>Flat 15 µs per request; better at 2,000 connections, worse at 256</td></tr>
+<tr><td>2</td><td>No buffer per connection</td><td>Done</td><td>Idle memory 4.54 KB to 0.30 KB per connection</td></tr>
+<tr><td>3</td><td>Write each response once</td><td>Done</td><td>None beyond noise</td></tr>
+<tr><td>4</td><td>Batching under high load</td><td>Done, off</td><td>None consistent</td></tr>
+<tr><td>5</td><td>Replace the store’s hash map</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>6</td><td>Lock once per shard</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>7</td><td>Faster JSON output</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>8</td><td>One system call per request</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>9</td><td>Less kernel work per operation</td><td>Open</td><td>Not measured</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">One of four implemented changes gave a clear win; one is a trade-off; two changed nothing measurable</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">29 / 30</p>
+<aside>The honest scorecard. Of the four implemented changes, removing the per-connection buffer is a clear win, on memory. Multishot receive is a trade-off that depends on connection count. Writing the response once and batching under load changed nothing that could be measured on this machine, although both leave the code no worse. The five open items are ordered by where the evidence points: the store and JSON output are the remaining differences between our bulk get path and the reference’s, which is about 1.4 times cheaper per request there. The last two are about kernel cost and only matter for small single requests.</aside>
+</section>
+<section id="next" data-transition="fade" style="background:#1F6FEB;color:#FBFCFE;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#FBFCFE">Recommended order</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">What to do next</h2>
+<ol style="font-size:40px;line-height:1.5;color:#FBFCFE">
+<li>Fix the Unicode escape defect: it corrupts stored data.</li>
+<li>Replace the store’s hash map and speed up JSON output together, then measure bulk get.</li>
+<li>Rerun everything with the load generator on a second machine.</li>
+<li>Only then consider the kernel-side items.</li>
+</ol>
+<p style="font-size:30px;line-height:1.4;color:#FBFCFE;width:1500px">Two of four changes so far measured nothing. Each next step should be benchmarked before and after, and dropped if it does not show.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#FBFCFE">Details: COMPARISON.md, bulkapi/RESULTS.md, reference-nodb/README.md</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#FBFCFE">30 / 30</p>
+<aside>The order follows the evidence. The escape defect comes first because it is a correctness problem with a small fix. The store and the JSON output are done together because they are the two remaining differences on the bulk get path, and bulk get is where our own code dominates; one before-and-after measurement then covers both. Third, the measurements themselves need a better setup: with the load generator on the same four cores, anything under about 1.5 times is noise, and a second machine would make smaller gains visible. The kernel-side items come last because each is small and they help the workload bulkapi is least about. The lesson from the first four changes is that the expected ranking was wrong about the response copy, so nothing should be kept on the strength of an estimate.</aside>
+</section>
+</div>
+<div id="notes"></div>
+<script>
+(function () {
+  var stage = document.getElementById('stage'), notes = document.getElementById('notes');
+  var slides = Array.prototype.slice.call(stage.querySelectorAll('section')), at = 0;
+  // A header cell's width and alignment apply to its whole column.
+  document.querySelectorAll('section table').forEach(function (t) {
+    var head = t.rows[0] ? t.rows[0].cells : [];
+    for (var r = 1; r < t.rows.length; r++)
+      for (var c = 0; c < t.rows[r].cells.length && c < head.length; c++)
+        if (head[c].style.textAlign && !t.rows[r].cells[c].style.textAlign) t.rows[r].cells[c].style.textAlign = head[c].style.textAlign;
+  });
+  function fit() {
+    var k = Math.min(innerWidth / 1920, innerHeight / 1080);
+    stage.style.transform = 'translate(' + (innerWidth - 1920 * k) / 2 + 'px,' + (innerHeight - 1080 * k) / 2 + 'px) scale(' + k + ')';
+  }
+  function show(i) {
+    at = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach(function (s, j) { s.classList.toggle('on', j === at); });
+    var a = slides[at].querySelector('aside');
+    notes.textContent = a ? a.textContent : '';
+    history.replaceState(null, '', '#slide-' + (at + 1));
+  }
+  addEventListener('resize', fit);
+  addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') show(at + 1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') show(at - 1);
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+    else if (e.key === 'n' || e.key === 'N') notes.classList.toggle('on');
+    else if (e.key === 'f' || e.key === 'F') document.documentElement.requestFullscreen();
+  });
+  stage.addEventListener('click', function (e) { show(at + (e.clientX < innerWidth / 3 ? -1 : 1)); });
+  var m = /^#slide-(\d+)$/.exec(location.hash);
+  fit();
+  show(m ? +m[1] - 1 : 0);
+})();
+</script>
+</body>
+</html>

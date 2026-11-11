@@ -1,0 +1,21 @@
+<section id="method" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Method</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">How each change was measured</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Same answers</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A 34-line probe is run before and after. Responses must be byte-identical, including split packets, pipelining and a 20 MB upload.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">CPU per request</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One server thread, so server CPU time divided by requests is meaningful. Old and new binaries run in alternating rounds.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Honest about noise</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The same binary varies by up to 2x between runs here. A difference under about 1.5x is not treated as real.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1200px;font-size:24px;color:#5F6B78">Intel i5-1145G7, 4 cores, WSL2; load generator on the same machine</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">3 / 30</p>
+<aside>Three rules were applied to every change. First, correctness: the same probe of 34 response lines is run against the old and the new build and must match byte for byte. Second, the metric: with a single server thread, CPU time per request is a cleaner signal than throughput, because the load generator shares the four cores. Third, noise: on this laptop the same binary can swing by a factor of two between runs, so small differences are reported as no measurable change rather than as wins.</aside>
+</section>

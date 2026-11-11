@@ -1,0 +1,19 @@
+<section id="write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · implemented, no measurable gain</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Write each response once</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> Handlers append the body straight into the output buffer after a reserved gap, and the header is filled in afterwards. Before, the body was built separately and then copied.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> The copy is gone, but it was not where the time went.</p>
+</div>
+<table style="width:820px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:40%;text-align:left">Bulk get</th><th style="width:30%;text-align:right">Before</th><th style="width:30%;text-align:right">After</th></tr>
+<tr><td>100 items, run 1</td><td>44.6 µs</td><td>40.9 µs</td></tr>
+<tr><td>100 items, run 2</td><td>46.0 µs</td><td>44.8 µs</td></tr>
+<tr><td>1,000 items</td><td>344–363 µs</td><td>347 µs</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request, one thread · all three backends · http.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">13 / 30</p>
+<aside>The reference server writes each response body once into its arena and places the headers in front of it. bulkapi built the body in a scratch string and then copied it into the connection’s output buffer. That copy is now removed for all three backends. A handler writes its body directly after a 160-byte gap. Small bodies, up to 4 kilobytes, are then moved down against the header. Larger bodies stay where they are and the header is padded with spaces in front of the Content-Length value, which HTTP allows. Responses are otherwise byte-identical to before. The measured effect is nothing beyond noise: about 45 microseconds per bulk get of 100 items before and after. This was first on the earlier list of expected gains, and the measurement says it should not have been.</aside>
+</section>

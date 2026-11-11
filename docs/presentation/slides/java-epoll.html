@@ -1,0 +1,17 @@
+<section id="java-epoll" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Java epoll backend</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) sel.select(this::onKey);<br><br>private void onKey(SelectionKey key) {<br>&#160;&#160;Conn c = (Conn) key.attachment();<br>&#160;&#160;if (c == null) { accept(); return; }<br>&#160;&#160;c.ensureRoom();<br>&#160;&#160;ByteBuffer in = c.in;<br>&#160;&#160;in.limit(in.capacity()).position(c.inLen);<br>&#160;&#160;int n = c.ch.read(in);<br>&#160;&#160;if (n &lt; 0) { drop(c); return; }<br>&#160;&#160;c.inLen += n;<br>&#160;&#160;Http.process(c, w);<br>&#160;&#160;if (flush(c)) return;<br>&#160;&#160;c.writing = true;<br>&#160;&#160;key.interestOps(SelectionKey.OP_WRITE);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">A Selector is epoll.</b> On Linux, Java’s selector is built on it. It reports which sockets are ready; the program then reads and writes them itself.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">select(this::onKey)</b> calls the method for each ready socket without building a set of keys first.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">OP_WRITE</b> is requested only when a reply does not fit in the socket in one go.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from EpollBackend.java (the write-ready branch and error handling left out) · one selector per thread</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">20 / 30</p>
+<aside>This is the readiness model, the one io_uring replaces. The selector tells the thread that a socket has data, and the thread then makes its own read call and its own write call: two system calls per request plus the wait, against io_uring’s shared queues. Each worker thread has its own selector and its own listening socket on the same port, so the kernel spreads new connections across threads and no connection is ever touched by two threads. Two details keep it lean. The form of select that takes a callback avoids allocating and clearing a set of ready keys on every turn. And the connection is only registered for write readiness when a reply could not be written in full, which is rare; in the normal case the reply is written straight after the request is handled. The read goes into a direct buffer at the position after any bytes already held.</aside>
+</section>

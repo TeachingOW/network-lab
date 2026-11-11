@@ -1,0 +1,21 @@
+<section id="single-shot" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Single-shot and multishot</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Single-shot</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One submission gives one completion. To receive the next request, the program must submit a new receive.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The program says which buffer to fill, so each connection needs its own.</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#18222D">--backend uring</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Multishot</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">One submission stays armed and gives a completion every time data arrives. Nothing is resubmitted.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel picks a buffer from a pool shared by all connections on the thread.</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#1F6FEB">--backend uring-ms</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Accepting connections was multishot in both backends from the start; the difference is in receiving</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">7 / 30</p>
+<aside>These two words describe how long a submission lasts. A single-shot operation is used up by its first result: submit one receive, get one completion, and submit again for the next request. Because the program names the buffer when it submits, each connection needs a buffer of its own waiting to be filled. A multishot operation stays in place after it completes. One receive is submitted when the connection opens, and from then on the kernel posts a completion each time data arrives. Since the program is not there to name a buffer each time, the kernel takes one from a ring of buffers the program registered in advance, shared by every connection on that thread. That sharing is what makes the memory saving on the next slides possible. bulkapi has one backend of each kind.</aside>
+</section>

@@ -1,0 +1,14 @@
+<section id="next" data-transition="fade" style="background:#1F6FEB;color:#FBFCFE;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#FBFCFE">Recommended order</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">What to do next</h2>
+<ol style="font-size:40px;line-height:1.5;color:#FBFCFE">
+<li>Fix the Unicode escape defect: it corrupts stored data.</li>
+<li>Replace the store’s hash map and speed up JSON output together, then measure bulk get.</li>
+<li>Rerun everything with the load generator on a second machine.</li>
+<li>Only then consider the kernel-side items.</li>
+</ol>
+<p style="font-size:30px;line-height:1.4;color:#FBFCFE;width:1500px">Two of four changes so far measured nothing. Each next step should be benchmarked before and after, and dropped if it does not show.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#FBFCFE">Details: COMPARISON.md, bulkapi/RESULTS.md, reference-nodb/README.md</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#FBFCFE">30 / 30</p>
+<aside>The order follows the evidence. The escape defect comes first because it is a correctness problem with a small fix. The store and the JSON output are done together because they are the two remaining differences on the bulk get path, and bulk get is where our own code dominates; one before-and-after measurement then covers both. Third, the measurements themselves need a better setup: with the load generator on the same four cores, anything under about 1.5 times is noise, and a second machine would make smaller gains visible. The kernel-side items come last because each is small and they help the workload bulkapi is least about. The lesson from the first four changes is that the expected ranking was wrong about the response copy, so nothing should be kept on the strength of an estimate.</aside>
+</section>

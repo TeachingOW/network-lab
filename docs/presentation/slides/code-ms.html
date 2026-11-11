@@ -1,0 +1,17 @@
+<section id="code-ms" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 1 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Arming a multishot receive</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">void prep_recv_multishot(Conn* c) {<br>&#160;&#160;io_uring_sqe* e = sqe();<br>&#160;&#160;io_uring_prep_recv_multishot(<br>&#160;&#160;&#160;&#160;&#160;&#160;e, c-&gt;fd, nullptr, 0, 0);<br>&#160;&#160;e-&gt;flags |= IOSQE_BUFFER_SELECT;<br>&#160;&#160;e-&gt;buf_group = kBufGroup;<br>&#160;&#160;io_uring_sqe_set_data64(e, (u64)c | OP_RECV);<br>&#160;&#160;c-&gt;recv_armed = true;<br>}<br><br><span style="color:#8FA3B8">// later, on each completion</span><br>if (!(flags &amp; IORING_CQE_F_MORE))<br>&#160;&#160;c-&gt;recv_armed = false;</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">No buffer is named.</b> The buffer argument is null and the length is 0. The kernel will choose a buffer each time data arrives.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">BUFFER_SELECT and buf_group</b> say which shared pool to take that buffer from.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">F_MORE</b> on a completion means the receive is still armed. When it is missing, for example because the pool ran dry, the loop arms it again.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From backend_uring_ms.cpp · io_uring_prep_recv_multishot needs liburing 2.3 or newer and Linux 6.0 or newer</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">9 / 30</p>
+<aside>This function runs once when a connection is accepted. sqe() returns the next free slot on the submission queue. io_uring_prep_recv_multishot fills it in as a receive that stays armed. Unlike a normal receive, it is given no buffer and a length of zero, because the program will not be there to supply one for each arrival. The two lines after it tell the kernel to pick a buffer from buffer group zero, the ring of 1,024 buffers this worker registered at startup. The tag is the connection pointer with the receive marker. On the way back, every completion carries a flag called F_MORE while the operation remains armed. If a completion arrives without it, the multishot has ended, which happens when the buffer pool is empty or on an error, and the connection is put on a list to be armed again at the end of the turn.</aside>
+</section>

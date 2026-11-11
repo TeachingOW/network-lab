@@ -1,0 +1,21 @@
+<section id="evidence" data-transition="fade" style="background:#0F1720;color:#F5F7F9;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#7FB6FF">Evidence for what comes next</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Against the reference without its database</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#B9C6D3">bulkapi wins at low connection counts and on pipelining, by 6x to 11x.</p>
+<p style="font-size:30px;line-height:1.4;color:#B9C6D3">The reference still wins at 2,000 connections and on bulk get. Those two gaps are what the open optimisations target.</p>
+</div>
+<table style="width:980px;font-size:28px;color:#F5F7F9;background:#18232F;border:1px solid #33414F;border-radius:16px">
+<tr><th style="width:34%;text-align:left">Requests per second</th><th style="width:22%;text-align:right">Reference</th><th style="width:22%;text-align:right">uring</th><th style="width:22%;text-align:right">uring-ms</th></tr>
+<tr><td>GET, 16 connections</td><td>6.5k</td><td>74k</td><td>51–72k</td></tr>
+<tr><td>GET, 256 connections</td><td>84k</td><td>82k</td><td>63k</td></tr>
+<tr><td>GET, 2,000 connections</td><td>62k</td><td>30k</td><td>46k</td></tr>
+<tr><td>GET, pipeline of 8</td><td>66k</td><td>390–640k</td><td>410–440k</td></tr>
+<tr><td>Bulk get, 100 items</td><td>36k</td><td>22k</td><td>13–19k</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#93A3B3">All three single-threaded, same session, two rounds · reference-nodb is the reference minus SQLite and JWT</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#93A3B3">18 / 30</p>
+<aside>To compare event loops without the database in the way, the reference was rebuilt with SQLite, its B-tree read paths, the group commit and JWT removed, serving bulkapi’s API from an in-memory table. This table is a same-session rerun against both current bulkapi backends, each limited to one thread. bulkapi is far ahead with 16 connections, because the reference waits up to 2 milliseconds per batch, and on pipelined requests, because the reference answers one request per connection per batch. At 256 connections they are level. The reference is ahead at 2,000 connections, at about 14 to 15 microseconds of CPU per request against 20 to 25 for uring-ms in this run, and on bulk get, at about 27 to 35 microseconds against 42 to 45. Its bulk get path differs from ours in three ways: a store with no locks, JSON escaping 16 bytes at a time, and a response written once. The third is now done and did not close the gap, which points at the store and the escaping.</aside>
+</section>

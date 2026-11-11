@@ -1,0 +1,19 @@
+{
+  "v": 4,
+  "createdOnFiles": {"v": 1, "at": "2026-11-10T17:30:00Z"},
+  "lists": "css",
+  "title": "bulkapi optimisations, one by one",
+  "cover": "cover",
+  "order": ["cover", "baseline", "method", "io-uring", "code-loop", "java-loop", "single-shot", "ms-recv", "code-ms", "no-buffer", "memory", "code-inplace", "write-once", "code-write-once", "java-write-once", "batching", "code-batching", "evidence", "java", "java-epoll", "java-sockets", "java-store", "store", "shard-lock", "json", "one-syscall", "kernel", "correctness", "summary", "next"],
+  "sections": {
+    "s1": {"description": "Where bulkapi’s time goes, how each change was measured, and what io_uring, single-shot and multishot mean.", "start": "cover"},
+    "s2": {"description": "The four optimisations that are implemented, each with its measured effect.", "start": "ms-recv"},
+    "s3": {"description": "What the reference without SQLite and the Java port show, and the optimisations still open.", "start": "evidence"},
+    "s4": {"description": "Status of every optimisation and the recommended order of work.", "start": "summary"}
+  },
+  "faces": {
+    "ibm-plex-sans": {"family": "IBM Plex Sans", "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"},
+    "jetbrains-mono": {"family": "JetBrains Mono", "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"}
+  },
+  "designSystems": []
+}

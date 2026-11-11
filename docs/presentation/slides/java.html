@@ -1,0 +1,19 @@
+<section id="java" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Three Java backends compared</h2>
+<table style="font-size:27px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:28%;text-align:left">Requests per second</th><th style="width:18%;text-align:right">C++ uring</th><th style="width:18%;text-align:right">Java uring</th><th style="width:18%;text-align:right">Java epoll</th><th style="width:18%;text-align:right">Java sockets</th></tr>
+<tr><td>GET, no pipelining</td><td>251–421k</td><td>267–271k</td><td>217–223k</td><td>73–132k</td></tr>
+<tr><td>GET, pipeline of 8</td><td>1.04–1.35M</td><td>1.20–1.22M</td><td>0.71–0.94M</td><td>0.53–0.68M</td></tr>
+<tr><td>Bulk insert, 100 items</td><td>46–60k</td><td>55–65k</td><td>46–50k</td><td>55–56k</td></tr>
+<tr><td>Bulk get, 100 items</td><td>43–54k</td><td>62–63k</td><td>46–47k</td><td>55–58k</td></tr>
+<tr><td>Memory after the run</td><td>20 MB</td><td>349–364 MB</td><td>335–346 MB</td><td>396–400 MB</td></tr>
+</table>
+<div style="display:flex;gap:48px">
+<p style="flex:1;font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Among the Java backends,</b> io_uring is fastest on every workload, epoll is about 20% behind, and blocking sockets fall furthest behind on small requests.</p>
+<p style="flex:1;font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Against C++,</b> Java io_uring is level within this machine’s noise, at about 18 times the memory.</p>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Two rounds, range shown · 4 threads, 256 connections (64 for bulk) · JDK 11, 1 GB starting heap · 0 errors</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">19 / 30</p>
+<aside>The Java port serves the same API from the same spec file, with three ways of doing input and output. The io_uring backend uses a small native shim to set the ring up, and then Java reads and writes the two queues directly in shared memory, so the only native call per loop turn is io_uring_enter. The epoll backend uses Java’s selectors, which are epoll on Linux, one per thread. The sockets backend is the simplest: a blocking socket and one pooled thread per connection. Among the three, io_uring leads everywhere. Epoll is about a fifth behind. Blocking sockets do well on bulk requests, where the work per request is large, but fall to between a quarter and a half of io_uring on small unpipelined requests, with a worst-case latency three to eight times higher, because 256 connections means 256 threads competing for four cores. Compared with the C++ server, Java io_uring is within noise on throughput. It already has two of the open C++ optimisations, an open-addressing store and a response written once. The clear cost is memory: about 350 megabytes against 20, most of it the Java heap that was sized at 1 gigabyte for the test.</aside>
+</section>

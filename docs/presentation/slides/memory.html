@@ -1,0 +1,22 @@
+<section id="memory" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 2 · how it works</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">How the memory was reduced</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">1. The cost before</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Every connection owned a 16 KB buffer. Memory comes in 4 KB pages, and the first page is in use as soon as the buffer exists: 4 KB per connection.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">2. Share the buffers</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Data now lands in a pool of 1,024 buffers per thread. The pool costs about 4 MB once, however many connections there are.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">3. Read it in place</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The request is handled straight from the shared buffer, which is then handed back. The connection keeps only a record of about 95 bytes.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A private buffer is still created when a request arrives in pieces, and is freed once the request is complete.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Opening 20,000 connections added 80 MB before and 1.9 MB after · the kernel’s own 4 KB per socket is unchanged</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">11 / 30</p>
+<aside>This slide explains the mechanism behind the previous number. The operating system gives out memory in pages of 4 kilobytes and only counts a page once something is written to it. Allocating a 16 kilobyte buffer writes a small bookkeeping header at its start, so the first page is in use immediately, and a small request lands in the same page. That is why each connection cost about 4 kilobytes, not 16. The fix has two parts. First, with multishot receive the kernel fills buffers from a shared pool, 1,024 buffers per thread; touching one page of each is about 4 megabytes, a fixed cost. Second, the server no longer copies the request out of that shared buffer: it parses it where it is and returns the buffer straight away. What remains per connection is a small record. The measurement: opening 20,000 connections added 80 megabytes before and 1.9 megabytes after, about 95 bytes each. The reference server reaches the same place a different way, with a 40-byte record in a table allocated at startup. None of this changes the kernel’s own memory, roughly 4 kilobytes per open socket.</aside>
+</section>

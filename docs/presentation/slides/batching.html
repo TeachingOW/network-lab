@@ -1,0 +1,19 @@
+<section id="batching" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 4 · implemented, off by default</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Batching under high load</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> When the previous loop turn handled 32 or more completions, the loop can wait a short time for more instead of waking for the first one.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> No consistent gain at any load tried. A busy loop already picks up many completions per wake-up.</p>
+</div>
+<table style="width:860px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:31%;text-align:left">Connections</th><th style="width:23%;text-align:right">Off</th><th style="width:23%;text-align:right">200 µs</th><th style="width:23%;text-align:right">1,000 µs</th></tr>
+<tr><td>16</td><td>19–20</td><td>17.5</td><td>18</td></tr>
+<tr><td>256</td><td>14–15</td><td>13–14</td><td>14–17</td></tr>
+<tr><td>2,000</td><td>14–16</td><td>14–20</td><td>15–16</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request in µs, GET, one thread · BULKAPI_BATCH_US, uring-ms backend</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">16 / 30</p>
+<aside>The reference waits for 64 completions or 2 milliseconds before each batch. That helps it at high connection counts and costs it a 2 millisecond floor at low ones: with 16 connections it managed 6,500 requests per second against 59,000 for bulkapi. So bulkapi got a load-adaptive version: it only waits when the previous turn was busy, for half as many completions again, up to a time limit set by the BULKAPI_BATCH_US environment variable. With limits of 200 and 1,000 microseconds, CPU per request did not move consistently at 16, 256 or 2,000 connections. The option stays in the code, switched off by default. It may behave differently on a machine where the load generator does not share the cores.</aside>
+</section>

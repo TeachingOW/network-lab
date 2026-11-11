@@ -1,0 +1,20 @@
+<section id="baseline" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Starting point</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Where bulkapi’s CPU time goes</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C">Single requests are bound by the kernel. Our parser, router and handler together cost under 1 µs.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk requests spend most of their time in our own code. That is where optimising pays.</p>
+</div>
+<table style="width:960px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:40%;text-align:left">Workload</th><th style="width:20%;text-align:right">Our code</th><th style="width:20%;text-align:right">Kernel</th><th style="width:20%;text-align:right">Kernel share</th></tr>
+<tr><td>GET, no pipelining</td><td>0.62 µs</td><td>6.31 µs</td><td>91%</td></tr>
+<tr><td>GET, pipeline of 8</td><td>0.38 µs</td><td>1.02 µs</td><td>73%</td></tr>
+<tr><td>Bulk insert, 100 items</td><td>13.9 µs</td><td>12.9 µs</td><td>48%</td></tr>
+<tr><td>Bulk get, 100 items</td><td>39.4 µs</td><td>15.9 µs</td><td>29%</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1200px;font-size:24px;color:#5F6B78">CPU per request, io_uring backend, one worker, 64 connections</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">2 / 30</p>
+<aside>Before changing anything, this is the split between time in our own code and time in the kernel, per request, with one worker. For a plain GET the kernel takes 91 percent, so tuning the parser or the router can gain at most a few percent. Bulk requests are different: a bulk get of 100 items spends 39 microseconds in our code against 16 in the kernel. A function-level profile was not available on this machine, so the ranking of ideas rests on this split and on reading the code.</aside>
+</section>

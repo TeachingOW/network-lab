@@ -1,0 +1,19 @@
+<section id="summary" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Summary</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Every optimisation and its status</h2>
+<table style="font-size:26px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:4%;text-align:left">#</th><th style="width:32%;text-align:left">Optimisation</th><th style="width:16%;text-align:left">Status</th><th style="width:48%;text-align:left">Measured effect</th></tr>
+<tr><td>1</td><td>Multishot receive</td><td>Done</td><td>Flat 15 µs per request; better at 2,000 connections, worse at 256</td></tr>
+<tr><td>2</td><td>No buffer per connection</td><td>Done</td><td>Idle memory 4.54 KB to 0.30 KB per connection</td></tr>
+<tr><td>3</td><td>Write each response once</td><td>Done</td><td>None beyond noise</td></tr>
+<tr><td>4</td><td>Batching under high load</td><td>Done, off</td><td>None consistent</td></tr>
+<tr><td>5</td><td>Replace the store’s hash map</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>6</td><td>Lock once per shard</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>7</td><td>Faster JSON output</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>8</td><td>One system call per request</td><td>Open</td><td>Not measured</td></tr>
+<tr><td>9</td><td>Less kernel work per operation</td><td>Open</td><td>Not measured</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">One of four implemented changes gave a clear win; one is a trade-off; two changed nothing measurable</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">29 / 30</p>
+<aside>The honest scorecard. Of the four implemented changes, removing the per-connection buffer is a clear win, on memory. Multishot receive is a trade-off that depends on connection count. Writing the response once and batching under load changed nothing that could be measured on this machine, although both leave the code no worse. The five open items are ordered by where the evidence points: the store and JSON output are the remaining differences between our bulk get path and the reference’s, which is about 1.4 times cheaper per request there. The last two are about kernel cost and only matter for small single requests.</aside>
+</section>

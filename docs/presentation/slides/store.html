@@ -1,0 +1,21 @@
+<section id="store" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 5 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Replace the store’s hash map</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Each shard is a <span style="color:#18222D">std::unordered_map</span>. Every new item allocates a node, and every lookup follows a pointer to it.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">An open-addressing table: keys and values in flat arrays, no node per entry, short values stored inline.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Why expect a gain</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The reference and the Java port both use this layout. The reference’s bulk get costs about 30 µs against our 43.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · store.h</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">23 / 30</p>
+<aside>This is now the first open item. The store is 256 shards, each a standard unordered map from a 64-bit id to a string. That container allocates one heap node per item and reaches each item through a pointer, so a bulk request of 100 items pays 100 allocations on insert and 100 cache misses on lookup. An open-addressing table keeps keys and values in flat arrays. Both the stripped reference and the Java port already use that layout. The expected gain is on the bulk endpoints, where our own code is 50 to 70 percent of the cost. No number is claimed: this has not been built or measured for the C++ server.</aside>
+</section>

@@ -1,0 +1,17 @@
+<section id="java-store" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The store the C++ server should copy</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">private long[] keys = new long[16];<br>private byte[][] vals = new byte[16][];<br><br>byte[] get(long k) {<br>&#160;&#160;int m = keys.length - 1;<br>&#160;&#160;for (int i = slot(k, m); vals[i] != null;<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;i = (i + 1) &amp; m)<br>&#160;&#160;&#160;&#160;if (keys[i] == k) return vals[i];<br>&#160;&#160;return null;<br>}<br><br>private int slot(long k, int mask) {<br>&#160;&#160;return (int) ((k * MIX) &gt;&gt;&gt; 20) &amp; mask;<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Two flat arrays.</b> Keys are plain 64-bit numbers side by side, with no object and no pointer per entry. A null value marks an empty slot.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">A lookup walks forward</b> from the key’s home slot until it finds the key or an empty slot. Neighbouring slots share a cache line.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">This is optimisation 5,</b> already built here. The C++ server still uses a node-based map.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From Store.java · 256 such shards, each locked separately · Java bulk get measured 62–63k req/s against C++ 43–54k</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">22 / 30</p>
+<aside>This is one shard of the Java store. Java’s built-in HashMap would box every 64-bit key into an object and wrap every entry in a node, which is the same shape of cost as the C++ unordered map. Instead the shard keeps keys in a long array and values in an array of byte arrays. To find a key, it multiplies by a large odd constant to scramble the bits, takes some of the high bits as a starting slot, and steps forward one slot at a time. Because the keys sit next to each other in memory, a short walk usually stays within one cache line. Insertion uses the same walk and doubles the arrays when they are three-quarters full; deletion shifts later entries back so walks never hit a false gap. This is exactly what the next slide proposes for the C++ server. In the two-round benchmark the Java io_uring backend did 62 to 63 thousand bulk gets per second against 43 to 54 thousand for C++, which is suggestive but not proof, since the two differ in other ways too.</aside>
+</section>

@@ -1,0 +1,21 @@
+<section id="shard-lock" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 6 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Lock once per shard, not per item</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A bulk request of 100 items takes and releases a spinlock 100 times, once for each item.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Group the batch by shard first, then take each shard’s lock once and handle all of its items together.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Trade-off</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk get must still return items in request order, so grouping needs a second pass. It pays most with several threads.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · handlers.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">24 / 30</p>
+<aside>The bulk handlers lock and unlock a shard for every single item. With one thread the locks are never contended, so each costs only two atomic operations, but with four threads working on the same shards they start to bounce cache lines between cores. Grouping a batch by shard means at most one lock per shard touched. The cost is that bulk get has to produce output in the order the ids were given, so the lookups would be done grouped and the results written in a second pass. The reference avoids the question entirely by having one thread own the store. This is expected to matter more as thread count goes up, and has not been measured.</aside>
+</section>

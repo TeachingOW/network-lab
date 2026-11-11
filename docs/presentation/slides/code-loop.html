@@ -1,0 +1,17 @@
+<section id="code-loop" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Background · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">The event loop</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">for (;;) {<br>&#160;&#160;io_uring_submit_and_wait(&amp;ring, 1);<br>&#160;&#160;io_uring_for_each_cqe(&amp;ring, head, cqe) {<br>&#160;&#160;&#160;&#160;seen++;<br>&#160;&#160;&#160;&#160;u64 op = cqe-&gt;user_data &amp; OP_MASK;<br>&#160;&#160;&#160;&#160;Conn* c = (Conn*)(cqe-&gt;user_data &amp; ~OP_MASK);<br>&#160;&#160;&#160;&#160;if (op == OP_RECV)<br>&#160;&#160;&#160;&#160;&#160;&#160;on_recv(c, cqe-&gt;res, cqe-&gt;flags);<br>&#160;&#160;&#160;&#160;else if (op == OP_SEND)<br>&#160;&#160;&#160;&#160;&#160;&#160;on_send(c, cqe-&gt;res);<br>&#160;&#160;}<br>&#160;&#160;io_uring_cq_advance(&amp;ring, seen);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">One call does both jobs.</b> submit_and_wait hands the kernel everything queued since the last turn, then sleeps until at least one operation has finished.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Each completion says whose it is.</b> user_data is a tag the program attached when it submitted: here the connection’s address, with the operation type in its lowest three bits.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">cq_advance</b> tells the kernel those results have been read.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from backend_uring_ms.cpp (accept handling left out)</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">5 / 30</p>
+<aside>This is the whole server loop, with the accept branch removed for space. Each turn makes one system call. That call submits whatever was queued during the previous turn, such as sends for the replies just produced, and blocks until the kernel has at least one result. The loop then walks the completion queue. A completion is 16 bytes: a result code, some flags, and user_data, a 64-bit value copied back unchanged from the submission. bulkapi stores the connection pointer there. Because the connection object is aligned to at least 8 bytes, its lowest three bits are always zero, so the operation type, receive or send, is packed into them and masked off here. Finally cq_advance moves the queue’s head so the kernel can reuse those slots.</aside>
+</section>

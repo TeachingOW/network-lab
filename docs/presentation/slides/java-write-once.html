@@ -1,0 +1,17 @@
+<section id="java-write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · in Java</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Body first, in Java</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">int start = out.begin();<br>route.handler.handle(w, out);<br>out.finish(start, w.status, w.ctype, !keepAlive);<br><br><span style="color:#8FA3B8">// inside Out.finish</span><br>boolean small = bodyLen &lt;= SMALL;<br>if (!small)&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// pad the header</span><br>&#160;&#160;for (; pad &gt; 0; pad--) h[n++] = ' ';<br>b.position(start);<br>b.put(h, 0, n);<br>if (small) {&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// close the gap</span><br>&#160;&#160;ByteBuffer src = b.duplicate();<br>&#160;&#160;src.limit(end).position(bodyStart);<br>&#160;&#160;b.put(src);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Same design as the C++ change.</b> The handler writes into the output buffer after a 160-byte gap, and the header is filled in afterwards.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The buffer is off-heap.</b> b is a direct ByteBuffer, so the kernel sends from it without an extra copy out of the Java heap.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">b.put(src)</b> on a view of the same buffer is Java’s way to move the small body down.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from Http.java and Out.java · the Java port was written this way from the start</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">15 / 30</p>
+<aside>The Java port had this design from its first version, and the C++ change copied it. The three lines at the top are the whole of it from the request handler’s point of view: reserve room, let the handler append, then finish. Inside finish, the header is assembled in a small reusable byte array. For a body over 4 kilobytes the spare room in the gap is filled with spaces before the length digits, so the body is never moved. For a small body the header is written compactly and the body is slid down to meet it. In Java that move is expressed by taking a second view of the same buffer with duplicate, limiting it to the body’s range, and putting it back into the buffer at the earlier position; for a direct buffer this becomes a single overlapping memory move. Using a direct buffer matters in Java: writing a heap array to a socket makes the runtime copy it off-heap first.</aside>
+</section>

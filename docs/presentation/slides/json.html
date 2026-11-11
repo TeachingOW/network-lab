@@ -1,0 +1,21 @@
+<section id="json" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 7 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Faster JSON output</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Today</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Escaping checks one byte at a time, and each item is built from several small appends that may each regrow the buffer.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Proposed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Scan 16 bytes at a time for a character that needs escaping, copy clean runs in one go, and reserve the response size up front.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Why expect a gain</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Bulk get is 70% our own code, and its output is almost all escaped values. The reference already scans 16 bytes at a time.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · json.cpp, handlers.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">25 / 30</p>
+<aside>Every value returned by a get or a bulk get passes through json_escape, which tests each byte for a quote, a backslash or a control character. Almost every byte passes, so the work is a long run of checks that find nothing. The reference tests 16 bytes at once using compiler vector extensions and copies the whole clean run with one memcpy. The second half of this item is reserving the output size before a bulk get starts, since the number of ids is known, so the output buffer does not regrow many times. With the response copy now gone and no gain seen from it, this and the store are the two remaining differences between our bulk get path and the reference’s.</aside>
+</section>

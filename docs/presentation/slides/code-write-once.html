@@ -1,0 +1,17 @@
+<section id="code-write-once" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 3 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Body first, header afterwards</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">size_t start = begin_response(c.out);<br>Res res{200, "application/json", c.out};<br>kRouteHandler[ridx](req, res);<br>finish_response(c.out, start, res.status,<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;res.ctype, !keep_alive);<br><br><span style="color:#8FA3B8">// inside finish_response</span><br>if (body &gt; kSmallBody) {<br>&#160;&#160;memset(h + n, ' ', pad);&#160;&#160;<span style="color:#8FA3B8">// pad the header</span><br>&#160;&#160;n += pad;<br>}<br>if (n &lt; kHdr) {&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// close the gap</span><br>&#160;&#160;memmove(h + n, h + kHdr, body);<br>&#160;&#160;o.resize(start + n + body);<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">begin_response</b> leaves a 160-byte gap in the output buffer. The handler’s body lands right after it, because res.body <i>is</i> the output buffer.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Large body (over 4 KB):</b> it stays put. The header is padded with spaces so it fills the gap exactly.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">Small body:</b> it is moved down against the header. Copying a few bytes is cheaper than sending 90 spaces.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from http.cpp · the padding goes in front of the Content-Length value, which HTTP permits</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">14 / 30</p>
+<aside>The difficulty with writing a response once is that the header contains the body’s length, which is not known until the body is finished. The top four lines show the approach. begin_response reserves 160 bytes and returns where they start. The response object handed to the handler holds a reference to the connection’s output buffer, so every append the handler makes goes directly into place. finish_response then builds the header. For a body larger than 4 kilobytes, it fills the unused part of the gap with spaces placed before the Content-Length number, which the HTTP grammar allows as optional whitespace, so the body never moves. For a small body it writes a normal compact header and slides the body down to meet it, since moving a few hundred bytes costs less than transmitting the padding on every small reply. The handlers themselves did not have to change.</aside>
+</section>

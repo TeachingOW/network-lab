@@ -1,0 +1,19 @@
+<section id="ms-recv" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 1 · implemented</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Multishot receive</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> One receive is armed per connection and keeps delivering data into a shared ring of buffers. Before, a receive was submitted again after every request.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> Cost per request stays flat as connections grow. It is cheaper than single-shot at 2,000 connections and dearer at 256.</p>
+</div>
+<table style="width:820px;font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:34%;text-align:left">Connections</th><th style="width:33%;text-align:right">Single-shot</th><th style="width:33%;text-align:right">Multishot</th></tr>
+<tr><td>256</td><td>8.8–9.8 µs</td><td>15.5–19.5 µs</td></tr>
+<tr><td>1,000</td><td>22 µs</td><td>15–18 µs</td></tr>
+<tr><td>2,000</td><td>27–28 µs</td><td>14.5–14.7 µs</td></tr>
+</table>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Server CPU per request, GET, no pipelining, one thread · --backend uring-ms</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">8 / 30</p>
+<aside>The first implemented change is a second io_uring backend, selected with backend uring-ms. It uses io_uring_prep_recv_multishot from liburing 2.15: one submission per connection, and the kernel posts a completion for each chunk of data into a buffer taken from a shared ring of 1,024 buffers of 16 kilobytes. The measured effect is a trade-off, not a plain win. Multishot costs about 15 microseconds per request whatever the connection count. Single-shot costs about 9 at 256 connections but 27 at 2,000. So multishot is the backend for thousands of connections and single-shot for a few hundred or fewer. Why single-shot degrades with connection count has not been established.</aside>
+</section>

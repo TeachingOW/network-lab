@@ -1,0 +1,21 @@
+<section id="correctness" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Before more speed · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Three defects to fix first</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Unicode escapes corrupt data</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">Inserting “café” stores “cafu00e9”. The backslash is dropped. The Java port and the reference decode it correctly.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Allocations are unchecked</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A failed allocation for a 64 MB body is a crash. The reference checks every one.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<h3 style="font-size:40px;font-weight:600;line-height:1.2">Header values are not trimmed</h3>
+<p style="font-size:30px;line-height:1.4;color:#44505C">A Content-Length with a trailing space is answered 400. The Java port and the reference accept it.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">All three confirmed against the running C++ server · json.cpp, conn.cpp, http.cpp</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">28 / 30</p>
+<aside>None of these is an optimisation, but the first one matters more than any of them. The bulk insert reader treats a backslash-u escape as an unknown escape and keeps only the letter u, so any non-ASCII text sent in escaped form is silently stored wrong. It was confirmed by inserting a value and reading it back. The second is that malloc and realloc results are never checked, in three places. The third is a small protocol strictness: a header value with trailing whitespace is rejected. The Java port fixes the first and third, which is why it differs from the C++ server on exactly two probe lines. There are also no automated tests; every check in this deck was a probe run by hand.</aside>
+</section>

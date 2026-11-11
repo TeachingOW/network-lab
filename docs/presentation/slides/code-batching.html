@@ -1,0 +1,17 @@
+<section id="code-batching" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5F6B78">Optimisation 4 · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Waiting longer only when busy</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">if (batch_us &gt; 0 &amp;&amp; last &gt;= kBusy) {<br>&#160;&#160;__kernel_timespec ts{0, batch_us * 1000};<br>&#160;&#160;rc = io_uring_submit_and_wait_timeout(<br>&#160;&#160;&#160;&#160;&#160;&#160;&amp;L.ring, &amp;cqe,<br>&#160;&#160;&#160;&#160;&#160;&#160;std::min(last / 2, 64u),<br>&#160;&#160;&#160;&#160;&#160;&#160;&amp;ts, nullptr);<br>} else {<br>&#160;&#160;rc = io_uring_submit_and_wait(&amp;L.ring, 1);<br>}<br><br><span style="color:#8FA3B8">// after the completions are handled</span><br>last = seen;</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">last</b> is how many completions the previous turn handled. kBusy is 32: fewer than that and the loop wakes for the first completion, as before.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">When busy,</b> it asks for half as many again, at most 64, and gives up waiting after batch_us microseconds.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The reference</b> always waits for 64 completions or 2 ms once a turn has seen 8, which is what costs it at low connection counts.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">From backend_uring_ms.cpp · batch_us comes from the BULKAPI_BATCH_US environment variable and defaults to 0, which is off</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">17 / 30</p>
+<aside>Batching means letting several completions accumulate before waking the server thread, so that each wake-up does more work. The risk is latency: a request that arrives alone waits for company that never comes. This code only takes that risk when the previous turn was already busy. If the last turn handled 32 or more completions, the loop asks the kernel to wait for half that number, capped at 64, with a time limit. Otherwise it behaves exactly as before and wakes on the first completion. The reference applies its batching much earlier, once a turn has seen 8 completions, and with a 2 millisecond limit; that is why it handled 6,500 requests per second with 16 connections against bulkapi’s 59,000. In the measurements this adaptive version neither helped nor hurt, so it is switched off unless the environment variable is set.</aside>
+</section>

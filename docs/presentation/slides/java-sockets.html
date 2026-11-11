@@ -1,0 +1,17 @@
+<section id="java-sockets" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">The Java port · in code</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Java blocking-sockets backend</h2>
+<div style="display:flex;gap:48px;align-items:flex-start">
+<div style="width:920px;background:#0F1720;border-radius:16px;padding:32px 40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.45;color:#E6EDF3;white-space:nowrap">while (!c.wantClose) {<br>&#160;&#160;c.ensureRoom();<br>&#160;&#160;ByteBuffer in = c.in;<br>&#160;&#160;in.limit(in.capacity()).position(c.inLen);<br>&#160;&#160;int n = ch.read(in);&#160;&#160;&#160;&#160;<span style="color:#8FA3B8">// blocks this thread</span><br>&#160;&#160;if (n &lt; 0) break;<br>&#160;&#160;c.inLen += n;<br>&#160;&#160;Http.process(c, w);<br>&#160;&#160;ByteBuffer b = c.out.b;<br>&#160;&#160;if (b.position() == 0) continue;<br>&#160;&#160;b.flip();<br>&#160;&#160;while (b.hasRemaining()) ch.write(b);<br>&#160;&#160;c.out.clear();<br>}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:28px">
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">One thread per connection.</b> The thread sleeps inside read() until the client sends something. There is no event loop at all.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The same parser.</b> Http.process is shared by all three Java backends; only the way bytes arrive and leave differs.</p>
+<p style="font-size:28px;line-height:1.4;color:#44505C"><b style="color:#18222D">The cost:</b> 256 connections means 256 threads competing for 4 cores, which is why it falls behind on small requests.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1400px;font-size:24px;color:#5F6B78">Abridged from SocketsBackend.java · threads come from a cached pool, so they are reused across connections</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">21 / 30</p>
+<aside>This is the simplest possible server and the one most Java code was written as for years. Each accepted connection is handed to a thread from a pool, and that thread runs this loop until the connection closes: block in read, handle whatever complete requests arrived, write the replies, repeat. It needs no selector, no queue and no state machine, because the thread’s own stack holds the state. It does well on bulk requests, where the work per request is large compared with the cost of waking a thread. It does badly on many small requests: with 256 connections there are 256 threads, the operating system has to switch between them on four cores, and worst-case latency was three to eight times that of the io_uring backend. On a newer JDK, virtual threads would remove much of that cost while keeping this code almost unchanged; only JDK 11 is installed here.</aside>
+</section>

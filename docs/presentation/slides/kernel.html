@@ -1,0 +1,16 @@
+<section id="kernel" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#B4470F">Optimisation 9 · not done</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">Less kernel work per operation</h2>
+<table style="font-size:28px;color:#18222D;background:#FCFDFE;border:1px solid #D5DCE3;border-radius:16px">
+<tr><th style="width:26%;text-align:left">Change</th><th style="width:44%;text-align:left">What it saves</th><th style="width:30%;text-align:left">Where it helps</th></tr>
+<tr><td>Direct descriptors</td><td>A file-table lookup on every receive and send</td><td>Every request</td></tr>
+<tr><td>Registered ring</td><td>A file lookup on every kernel entry</td><td>Low concurrency</td></tr>
+<tr><td>No-delay on the listener</td><td>One system call per accepted connection</td><td>Short-lived connections</td></tr>
+<tr><td>Zero-copy send</td><td>The copy of the response into the kernel</td><td>Large responses, not loopback</td></tr>
+<tr><td>Idle timeout</td><td>Memory held by dead or stalled clients</td><td>Many connections</td></tr>
+</table>
+<p style="font-size:30px;line-height:1.4;color:#44505C">The kernel is 73–91% of the cost of a small request, so this is the only route to a faster single GET. Each item is small, and none has been measured here.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Expected, not measured · the reference uses the first three and the last</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">27 / 30</p>
+<aside>These are grouped because each is a small saving inside the kernel. Direct descriptors mean accepted sockets live in a table registered with the ring, so each operation skips looking the file up and taking a reference on it. Registering the ring’s own descriptor does the same for io_uring_enter. Setting TCP no-delay once on the listening socket, which accepted sockets inherit, removes a setsockopt call per connection. Zero-copy send avoids copying a response into the kernel, but it only pays above roughly ten kilobytes and gives nothing over loopback, which is how everything here was measured. The idle timeout is not about speed: bulkapi never closes a stalled connection, and the reference closes them after 90 seconds. Direct descriptors need a linked cancel, shutdown and close sequence, which makes the close path more complex.</aside>
+</section>

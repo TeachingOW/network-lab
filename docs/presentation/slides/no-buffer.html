@@ -1,0 +1,23 @@
+<section id="no-buffer" data-transition="fade" style="background:#F5F7F9;color:#18222D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6FEB">Optimisation 2 · implemented</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.1">No buffer per connection</h2>
+<div style="display:flex;gap:64px;align-items:flex-start">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">What changed.</b> A request is parsed in place in the shared receive buffer, with no copy. A private buffer exists only while a request is incomplete, and is freed after.</p>
+<p style="font-size:30px;line-height:1.4;color:#44505C"><b style="color:#18222D">Result.</b> Memory per idle connection fell 14-fold. Speed is unchanged.</p>
+</div>
+<div style="width:760px;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #D5DCE3;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">Before, per idle connection</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#18222D">4.54 KB</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FCFDFE;padding:40px;border:1px solid #1F6FEB;border-radius:16px">
+<p style="font-size:24px;color:#5F6B78">After, per idle connection</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:64px;font-weight:600;line-height:1.1;color:#1F6FEB">0.30 KB</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#5F6B78">Process memory growth, 20,000 connections idle after one request each · --backend uring-ms</p>
+<p style="position:absolute;right:128px;bottom:64px;width:200px;text-align:right;font-size:24px;color:#5F6B78">10 / 30</p>
+<aside>The multishot backend already received into shared buffers, but it copied every request into a 16 kilobyte buffer owned by the connection. Now the request is parsed directly in the shared buffer. Only two cases still need a private buffer: a request that has not fully arrived, and input that arrives while a reply is being sent. That buffer is freed as soon as it is drained. Output buffers are borrowed from a per-worker pool only while a reply exists. Measured with 20,000 connections that each made one request and then sat idle, memory per connection went from 4.54 kilobytes to 0.30. The single-shot backend still holds 4.33 kilobytes. An earlier estimate of 16 kilobytes per connection was wrong: only the touched part of each buffer stays in memory.</aside>
+</section>
