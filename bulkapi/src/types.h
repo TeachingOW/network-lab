@@ -15,6 +15,11 @@ struct Req {
     std::string_view path, query, body;
     Params params;
 };
+// The content types handlers set. Use these constants (not literals): the response writer
+// recognises them by address and uses a prebuilt header prefix for them.
+inline constexpr char kJson[] = "application/json";
+inline constexpr char kNdjson[] = "application/x-ndjson";
+
 // A handler appends its body to `body`, which is the connection's output buffer itself:
 // the body is written once, where it will be sent from. Handlers must only append.
 struct Res {

@@ -35,7 +35,6 @@ constexpr unsigned kBufSize = 16 * 1024;
 constexpr int kBufGroup = 0;
 constexpr size_t kBacklogCap = 1 << 20;  // unprocessed input allowed while a send is in flight
 constexpr size_t kSso = 15;              // capacity of an empty std::string (no heap buffer)
-constexpr unsigned kBusy = 32;           // completions in a turn that count as high load
 
 // user_data = Conn* | op
 enum : u64 { OP_ACCEPT = 0, OP_RECV = 1, OP_SEND = 2, OP_CANCEL = 3, OP_MASK = 7 };
@@ -57,7 +56,7 @@ struct Loop {
         if (rc < 0) { fprintf(stderr, "worker %d: io_uring_queue_init_params: %s\n", w.id, strerror(-rc)); return false; }
         br = io_uring_setup_buf_ring(&ring, kBufs, kBufGroup, 0, &rc);
         if (!br) { fprintf(stderr, "worker %d: io_uring_setup_buf_ring: %s\n", w.id, strerror(-rc)); return false; }
-        void* m = mmap(nullptr, (size_t)kBufs * kBufSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void* m = mmap(nullptr, (size_t)kBufs * kBufSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
         if (m == MAP_FAILED) { perror("mmap receive buffers"); return false; }
         bufs = (char*)m;
         for (unsigned i = 0; i < kBufs; i++)
@@ -134,7 +133,8 @@ struct Loop {
     static void stash(Conn* c, const char* p, size_t n) {
         size_t want = c->in_len + n;
         if (want > c->in_cap) {
-            size_t ncap = std::max({want, c->need_total, c->in_cap * 2});
+            size_t ncap = std::max(want, c->in_cap * 2);  // doubling: an announced body is not reserved up front
+            if (c->need_total >= want) ncap = std::min(ncap, c->need_total);
             c->in = (char*)realloc(c->in, ncap);
             c->in_cap = ncap;
         }
@@ -151,6 +151,29 @@ struct Loop {
         c->out.clear();
         if (c->out.capacity() <= (1u << 20) && outs.size() < 4096) outs.push_back(std::move(c->out));
         c->out = std::string();
+    }
+
+    // Restart the timeout that matches the connection's state (after every event on it).
+    static void touch(Conn* c) {
+        if (c->fd >= 0 && !c->closing) timer_update(*c, c->sending);
+    }
+
+    // A deadline passed. Half a request held: answer 408 and close after it is sent. Otherwise
+    // (idle, or a send not progressing) close; shutdown() makes the operations in flight end.
+    void expire(Conn* c) {
+        if (c->closing) return;
+        if ((c->expired == T_HEADER || c->expired == T_BODY) && !c->sending) {
+            drop_in(c);
+            c->need_total = 0;
+            take_out(c);
+            append_timeout_response(c->out);
+            c->want_close = true;
+            if (c->recv_armed && !c->recv_cancel) prep_cancel_recv(c);
+            prep_send(c);
+            touch(c);
+            return;
+        }
+        start_close(c);
     }
 
     // After process(): send what it produced, or hand the output buffer back.
@@ -193,12 +216,13 @@ struct Loop {
         bool has_buf = flags & IORING_CQE_F_BUFFER;
         unsigned bid = flags >> IORING_CQE_BUFFER_SHIFT;
         if (!(flags & IORING_CQE_F_MORE)) c->recv_armed = c->recv_cancel = false;  // the multishot ended
-        if (res > 0 && has_buf && !c->closing) feed(c, buf_ptr(bid), (size_t)res);
+        if (res > 0 && has_buf && !c->closing && !c->want_close) feed(c, buf_ptr(bid), (size_t)res);
         if (has_buf) buf_return(bid);
         if (c->fd < 0) return;  // feed() closed and freed it
         if (c->closing) { maybe_free(c); return; }
         if (res > 0) {
             if (!c->recv_armed) rearm.push_back(c);
+            touch(c);
         } else if (res == -ENOBUFS || res == -EINTR || res == -EAGAIN) {
             rearm.push_back(c);  // buffer ring ran dry: arm again after this batch has returned its buffers
         } else if (res == -ECANCELED) {
@@ -218,7 +242,7 @@ struct Loop {
         if (c->closing) { maybe_free(c); return; }
         if (res < 0) { start_close(c); return; }
         c->out_off += res;
-        if (c->out_off < c->out.size()) { prep_send(c); return; }
+        if (c->out_off < c->out.size()) { prep_send(c); touch(c); return; }
         c->out.clear();
         c->out_off = 0;
         if (c->want_close) { give_out(c); start_close(c); return; }
@@ -227,6 +251,7 @@ struct Loop {
         if (c->fd < 0 || c->closing) return;
         if (c->peer_eof) { if (!c->sending) start_close(c); return; }
         if (!c->recv_armed) rearm.push_back(c);
+        touch(c);
     }
 };
 
@@ -235,23 +260,27 @@ struct Loop {
 bool run_uring_ms(Worker& w, int lfd) {
     Loop L(w);
     if (!L.init()) return false;
-    // BULKAPI_BATCH_US=N: when the previous turn was busy, wait up to N microseconds for half as
-    // many completions again (at most 64) instead of waking for the first one. 0 or unset = off.
-    const char* env = getenv("BULKAPI_BATCH_US");
-    long batch_us = env ? atol(env) : 0;
+    long batch_us = g_batch_wait_us;  // --batch-wait-us, see conn.h
     fprintf(stderr, "worker %d: io_uring multishot recv (liburing %d.%d, %u x %u KB shared buffers, batch wait %ld us)\n",
             w.id, io_uring_major_version(), io_uring_minor_version(), kBufs, kBufSize / 1024, batch_us);
     L.prep_accept(lfd);
     unsigned last = 0;
+    timer_clock();
     for (;;) {
         int rc;
         io_uring_cqe* cqe;
-        if (batch_us > 0 && last >= kBusy) {
-            __kernel_timespec ts{0, batch_us * 1000};
+        int tmo = timer_wait_ms();
+        if (batch_us > 0 && last >= kBusy && tmo != 0) {
+            long us = tmo < 0 ? batch_us : std::min<long>(batch_us, tmo * 1000L);  // never past a deadline
+            __kernel_timespec ts{us / 1000000, (us % 1000000) * 1000};
             rc = io_uring_submit_and_wait_timeout(&L.ring, &cqe, std::min(last / 2, 64u), &ts, nullptr);
+        } else if (tmo >= 0) {
+            __kernel_timespec ts{tmo / 1000, (long long)(tmo % 1000) * 1000000};
+            rc = io_uring_submit_and_wait_timeout(&L.ring, &cqe, 1, &ts, nullptr);
         } else {
             rc = io_uring_submit_and_wait(&L.ring, 1);
         }
+        timer_clock();
         if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY && rc != -ETIME) {
             fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-rc));
             return true;
@@ -269,6 +298,7 @@ bool run_uring_ms(Worker& w, int lfd) {
                     Conn* nc = conn_new(res, false);  // no private input buffer
                     w.st->conns.store(w.st->conns.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
                     L.prep_recv_multishot(nc);
+                    timer_update(*nc, false);
                 }
                 if (!(flags & IORING_CQE_F_MORE)) L.prep_accept(lfd);
             } else if (op == OP_RECV) {
@@ -280,7 +310,8 @@ bool run_uring_ms(Worker& w, int lfd) {
         io_uring_cq_advance(&L.ring, seen);
         last = seen;
         for (Conn* c : L.rearm)
-            if (c->fd >= 0 && !c->closing && !c->recv_armed && !c->peer_eof) L.prep_recv_multishot(c);
+            if (c->fd >= 0 && !c->closing && !c->want_close && !c->recv_armed && !c->peer_eof) L.prep_recv_multishot(c);
         L.rearm.clear();
+        while (Conn* c = timer_pop_expired()) L.expire(c);
     }
 }

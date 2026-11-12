@@ -34,8 +34,10 @@ void run_epoll(Worker& w, int lfd) {
     epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &ev);
     epoll_event evs[256];
     auto drop = [&](Conn* c) { epoll_ctl(ep, EPOLL_CTL_DEL, c->fd, nullptr); conn_free(c); };
+    timer_clock();
     for (;;) {
-        int n = epoll_wait(ep, evs, 256, -1);
+        int n = epoll_wait(ep, evs, 256, timer_wait_ms());
+        timer_clock();
         for (int i = 0; i < n; i++) {
             Conn* c = (Conn*)evs[i].data.ptr;
             if (!c) {
@@ -47,6 +49,7 @@ void run_epoll(Worker& w, int lfd) {
                     e2.events = EPOLLIN;
                     e2.data.ptr = nc;
                     epoll_ctl(ep, EPOLL_CTL_ADD, fd, &e2);
+                    timer_update(*nc, false);
                     w.st->conns.store(w.st->conns.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
                 }
                 continue;
@@ -57,8 +60,10 @@ void run_epoll(Worker& w, int lfd) {
                 if (e & (EPOLLOUT | EPOLLHUP)) {
                     int f = flush_out(*c);
                     if (f < 0) { drop(c); continue; }
+                    if (f == 1) timer_update(*c, true);  // progress (or not): the write timeout restarts on each event
                     if (f == 0) {
                         if (c->want_close) { drop(c); continue; }
+                        timer_update(*c, false);
                         c->ep_out = false;
                         epoll_event e2{};
                         e2.events = EPOLLIN;
@@ -75,9 +80,14 @@ void run_epoll(Worker& w, int lfd) {
                 if (r < 0) continue;
                 c->in_len += r;
                 process(*c, w);
-                if (c->out.empty()) { if (c->want_close) drop(c); continue; }
+                if (c->out.empty()) {
+                    if (c->want_close) drop(c);
+                    else timer_update(*c, false);
+                    continue;
+                }
                 int f = flush_out(*c);
                 if (f < 0 || (f == 0 && c->want_close)) { drop(c); continue; }
+                timer_update(*c, f == 1);
                 if (f == 1) {
                     c->ep_out = true;
                     epoll_event e2{};
@@ -86,6 +96,15 @@ void run_epoll(Worker& w, int lfd) {
                     epoll_ctl(ep, EPOLL_CTL_MOD, c->fd, &e2);
                 }
             }
+        }
+        // Deadlines: a half-received request gets a best-effort 408, anything else is just closed.
+        while (Conn* c = timer_pop_expired()) {
+            if ((c->expired == T_HEADER || c->expired == T_BODY) && !c->ep_out) {
+                std::string r;
+                append_timeout_response(r);
+                (void)!send(c->fd, r.data(), r.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+            }
+            drop(c);
         }
     }
 }

@@ -18,24 +18,20 @@ struct Uring {
     unsigned *sq_head, *sq_tail, *sq_mask, *sq_array, *cq_head, *cq_tail, *cq_mask;
     io_uring_sqe* sqes;
     io_uring_cqe* cqes;
-    const char* mode = "";
+    const char* error = "";  // why init() failed
 
+    // Needs SINGLE_ISSUER + DEFER_TASKRUN (Linux 6.1+) and IORING_FEAT_EXT_ARG (5.11+); there is no
+    // fallback for an older kernel.
     bool init(unsigned ent, unsigned cq_ent) {
-        struct Try { unsigned flags; const char* name; };
-        Try tries[] = {
-            {IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN, "single-issuer+defer-taskrun"},
-            {IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN, "coop-taskrun"},
-            {IORING_SETUP_CQSIZE, "plain"},
-        };
         io_uring_params p;
-        for (auto& t : tries) {
-            memset(&p, 0, sizeof p);
-            p.flags = t.flags;
-            p.cq_entries = cq_ent;
-            fd = (int)syscall(__NR_io_uring_setup, ent, &p);
-            if (fd >= 0) { mode = t.name; break; }
+        memset(&p, 0, sizeof p);
+        p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+        p.cq_entries = cq_ent;
+        fd = (int)syscall(__NR_io_uring_setup, ent, &p);
+        if (fd < 0) { error = strerror(errno); return false; }
+        if (!(p.features & IORING_FEAT_EXT_ARG)) {
+            close(fd); fd = -1; error = "the kernel lacks IORING_FEAT_EXT_ARG (timed waits)"; return false;
         }
-        if (fd < 0) return false;
         size_t sq_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
         size_t cq_sz = p.cq_off.cqes + p.cq_entries * sizeof(io_uring_cqe);
         void* sq_ptr; void* cq_ptr;
@@ -48,7 +44,7 @@ struct Uring {
         }
         sqes = (io_uring_sqe*)mmap(nullptr, p.sq_entries * sizeof(io_uring_sqe), PROT_READ | PROT_WRITE,
                                    MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
-        if (sq_ptr == MAP_FAILED || cq_ptr == MAP_FAILED || sqes == MAP_FAILED) { close(fd); fd = -1; return false; }
+        if (sq_ptr == MAP_FAILED || cq_ptr == MAP_FAILED || sqes == MAP_FAILED) { error = strerror(errno); close(fd); fd = -1; return false; }
         char* s = (char*)sq_ptr; char* q = (char*)cq_ptr;
         sq_head = (unsigned*)(s + p.sq_off.head);
         sq_tail = (unsigned*)(s + p.sq_off.tail);
@@ -64,15 +60,26 @@ struct Uring {
         return true;
     }
 
-    // Push queued SQEs to the kernel; optionally wait for >= 1 completion.
-    int enter(bool wait) {
+    // Push queued SQEs to the kernel; optionally wait for >= min_complete completions, for at most
+    // timeout_us (-1: no limit).
+    int enter(bool wait, long long timeout_us = -1, unsigned min_complete = 1) {
         __atomic_store_n(sq_tail, local_tail, __ATOMIC_RELEASE);
+        __kernel_timespec ts;
+        io_uring_getevents_arg arg{};
+        bool timed = wait && timeout_us >= 0;
+        if (!timed) min_complete = 1;  // never wait for several completions without a time limit
+        if (timed) {
+            ts.tv_sec = timeout_us / 1000000;
+            ts.tv_nsec = (timeout_us % 1000000) * 1000;
+            arg.ts = (uint64_t)(uintptr_t)&ts;
+        }
         for (;;) {
-            unsigned flags = wait ? IORING_ENTER_GETEVENTS : 0;
-            long r = syscall(__NR_io_uring_enter, fd, pending, wait ? 1u : 0u, flags, nullptr, 0);
+            unsigned flags = (wait ? IORING_ENTER_GETEVENTS : 0) | (timed ? IORING_ENTER_EXT_ARG : 0);
+            long r = syscall(__NR_io_uring_enter, fd, pending, wait ? min_complete : 0u, flags,
+                             timed ? (void*)&arg : nullptr, timed ? sizeof arg : 0);
             if (r < 0) {
                 if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EBUSY) return 0;  // CQ pressure: caller drains
+                if (errno == EAGAIN || errno == EBUSY || errno == ETIME) return 0;  // CQ pressure / timed out
                 return -1;
             }
             pending -= (unsigned)r;
