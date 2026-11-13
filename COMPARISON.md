@@ -7,6 +7,13 @@ Ours, in `bulkapi/src/`: `backend_uring.cpp` and `backend_epoll.cpp` (event loop
 routing, serialisation), `conn.cpp` (connection buffers), `handlers.cpp`, `json.cpp`, `store.h`.
 Measured numbers are in `bulkapi/RESULTS.md`.
 
+Status (2026-11-12): bulkapi now has connection timeouts (idle, header, body, write; item 5's idle
+sweep, done with per-timeout deadline lists instead of a periodic scan), a timed batch wait (item 4, at
+200 us instead of 2 ms, and only under load), and a new store and JSON writer. With one thread each it
+uses less or equal CPU per request than the reference on every measured workload on x-02 (native Linux),
+including 2,000 connections (9.5 against 11.3 us) and bulk get (level); on x-01 (WSL) the reference is
+still about 10% ahead at 2,000 connections. Numbers and method: `bulkapi/RESULTS.md`, last section.
+
 Status (2026-11-10): of the items under "What bulkapi should take", two are done. Item 1 exists as the
 `uring-ms` backend (multishot receive into a shared buffer ring, no per-connection buffer, requests parsed
 in place; it uses multishot receive, not poll plus a read queue). Item 6, writing the response body once,
@@ -34,11 +41,92 @@ The hosted original is https://claude.ai/artifact/5vCT6Gb6C8NY6Y11YzjWFC (privat
 | Data | in-memory sharded hash map | SQLite B-tree, durable, group commit |
 | Threads | one per core, one ring each | **one thread**, up to 8 rings |
 | Routing | generated from `api.spec` at build time | hand-written `if`/`memcmp` in `app.h` |
-| Fallback | epoll | none (needs Linux 6.1+) |
+| Fallback | none (needs Linux 6.1+); epoll only if chosen with `--backend epoll` | none (needs Linux 6.1+) |
 
 Almost every design choice in theirs follows from "memory per idle connection is the ceiling".
 
-## Side by side, by mechanism
+## Design choices against bulkapi today (2026-11-12)
+
+Compares the reference with bulkapi's `uring-ms` backend as it is now, with the timeouts and the batch
+wait. The section after this one describes bulkapi as it was on 2026-11-10 and goes into more depth on
+the reference.
+
+| Choice | Reference | bulkapi `uring-ms` | Which is better, and when |
+|---|---|---|---|
+| Threads | 1 thread, up to 16 rings (8 at the default 500k connections) | 1 ring per worker thread (`-t N`) | Ours scales across cores; theirs needs no locks and nothing is shared |
+| Waiting for data | Multishot poll, then one `recv` per readable connection | Multishot `recv` | Ours: one kernel operation per request instead of two. Theirs: no buffer held while idle, and bursts can't drain the buffer pool |
+| Descriptors | Direct (`IOSQE_FIXED_FILE`) | Ordinary file descriptors | Theirs: cheaper on every operation. Our main lever not yet taken |
+| Per-connection state | ~40 B, no buffer while idle | `Conn` plus pooled buffers, 0.30 KB per idle connection | Theirs, but it only matters at hundreds of thousands of connections |
+| When responses are sent | All together, after the batch's SQLite commit | As soon as each one is ready | Theirs is needed for safe commits; ours has lower latency without a database |
+| Batch wait | Fixed: 64 completions or 2 ms once a batch has 8+ | Adaptive: half the last batch (max 64) or 200 µs, only after 32+ | Ours: batches only under load, holds answers for at most 200 µs |
+| Timeouts | Idle only: every slot scanned every 2 s, closed after 90 s | Idle, header, body and write; per-kind deadline lists | Ours: O(1) timers, the server sleeps until the next deadline, slow requests get a 408 |
+| Pipelining | At most one request per connection per batch | Every complete request in the buffer, one `send` for all the answers | Ours: about 6x cheaper per pipelined request |
+
+**Threads.** A ring is the pair of queues a program shares with the kernel: requests go into one queue and
+completions come back in the other.
+- **Theirs:** several rings are needed only because each ring's descriptor table holds at most about 65k
+  connections. The thread waits on ring 0 alone. Each other ring signals a registered eventfd that ring 0
+  polls, so one wait covers all of them.
+- **Ours:** each worker thread owns its ring, its connections and its loop. Threads share only the store,
+  which is split into shards with a spinlock each.
+- The benchmarks run both with one thread, so they compare cost per request, not the ceiling.
+
+**Waiting for data.**
+- **Theirs:** a multishot poll reports that a socket is readable without reading it. The connection then
+  joins a read queue, and the server issues one `recv` with `MSG_DONTWAIT` into a buffer picked from a
+  shared pool. It never has more reads in flight than free buffers.
+- **Ours:** one multishot `recv` stays armed. Each time data arrives, the kernel fills a pool buffer and
+  posts a completion. If the pool runs dry, the kernel ends the receive with `ENOBUFS` and it has to be
+  armed again.
+- **Our `uring` backend:** a single-shot `recv` into the connection's own 16 KB buffer, armed again after
+  every request, with `IORING_RECVSEND_POLL_FIRST`.
+
+**Descriptors.**
+- **Theirs:** an accepted socket goes into a table inside the ring and is named by its slot number.
+  - Using it is an array index. An ordinary descriptor costs a file-table lookup and an atomic reference
+    count on every operation.
+  - The slot number also indexes the connection array.
+  - Plain system calls such as `shutdown` can't use it, so closing is done with linked io_uring operations.
+- **Ours:** ordinary descriptors. Our timeouts rely on a plain `shutdown()` to end a stuck operation.
+
+**Per-connection state.**
+- **Theirs:** input sits in a shared 1 KB buffer only while it is parsed. Leftover bytes are copied to the
+  connection's `pend`, which is freed once used.
+- **Ours:** a connection gets its own buffer only to hold a partial request.
+- Either way the kernel's own 3–4 KB per socket is far larger.
+
+**When responses are sent.**
+- **Theirs:** answers are written into a reference-counted 1 MB arena. One `COMMIT` covers the batch, and
+  only then do the sends go out. A client never gets "OK" for a write that a failed commit loses, and
+  2,000 requests share one commit.
+- **Ours:** the store is in memory with nothing to commit, so each response is sent as soon as it is ready.
+
+**Batch wait.** Waking for every completion costs a system call and a loop turn each time; under load it is
+cheaper to wait briefly and handle many at once.
+- **Theirs:** the fixed wait can hold every answer for the full 2 ms under moderate load.
+- **Ours:** wakes on the first completion when lightly loaded. Set with `--batch-wait-us`, 0 turns it off;
+  a sweep on x-02 picked 200 µs.
+
+**Timeouts.**
+- **Theirs:** `sweep()` walks every slot of every ring.
+- **Ours:** each kind has its own flag (`--idle-timeout`, `--header-timeout`, `--body-timeout`,
+  `--write-timeout`) and its own list. All entries in a list share one duration, so appending keeps it
+  sorted:
+  - starting or refreshing a timer is O(1);
+  - expiry looks only at the four list heads;
+  - the kernel wait sleeps until the earliest deadline. With 1,200 idle connections the server did not
+    wake once in 3 s.
+- **Slow clients:** a slow header or body gets a 408, which stops slowloris-style clients. The reference
+  has no defence against them.
+
+**Pipelining** (several requests sent without waiting for answers; the benchmark sends 8).
+- **Theirs:** `conn_feed` answers one request, then the connection is flagged `CF_REPLIED` until the
+  batch's send. The other seven wait in `pend`, a full loop turn each.
+- **Ours:** `process()` handles every complete request in the buffer and appends each answer to one output
+  buffer.
+- Result on x-02: about 1.45 µs of server CPU per pipelined request with us, about 9 µs with the reference.
+
+## Side by side, by mechanism (bulkapi as of 2026-11-10)
 
 ### 1. Waiting for data (the biggest difference)
 - **Ours:** every connection always has a single-shot `IORING_OP_RECV` armed into its own heap buffer (16 KB to start, `conn_new`/`sq_recv`). The buffer is 16 KB of address space, of which about 4.3 KB is resident once the connection has made a request (measured), so 300k idle connections would hold about 1.3 GB.
@@ -111,8 +199,8 @@ byte at a time. Those three are where the reference's bulk-get path differs from
 1. **Poll + provided-buffer ring + bounded read queue** instead of a per-connection buffer and an always-armed recv. Biggest win for connection count and memory. Keep our "process everything buffered" path for pipelined throughput.
 2. **Direct descriptors** (`FILE_INDEX_ALLOC` + `IOSQE_FIXED_FILE`) and the linked cancel/shutdown/close.
 3. **Generation counters in user_data** - a prerequisite for 1 and 2 (several ops per connection).
-4. **Timed batched wait** (`EXT_ARG`, min N CQEs or ~1-2 ms) and publishing CQ head / buffer tail every 256 CQEs.
-5. **Idle sweep** and an accept cutoff before the table is full.
+4. **Timed batched wait** (`EXT_ARG`, min N CQEs or ~1-2 ms) and publishing CQ head / buffer tail every 256 CQEs. *Wait done (200 us, only when busy); early publishing not done.*
+5. **Idle sweep** and an accept cutoff before the table is full. *Idle, header, body and write timeouts done; accept cutoff not needed without a direct-descriptor table.*
 6. **Write the response body once** with header room in front, and precompute the constant error responses.
 7. Optional: more listeners per thread, prefault/mlock, PGO.
 

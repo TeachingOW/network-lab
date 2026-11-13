@@ -17,6 +17,7 @@ static const char* status_text(int s) {
         case 204: return "204 No Content";
         case 400: return "400 Bad Request";
         case 404: return "404 Not Found";
+        case 408: return "408 Request Timeout";
         case 405: return "405 Method Not Allowed";
         case 413: return "413 Payload Too Large";
         case 431: return "431 Request Header Fields Too Large";
@@ -38,14 +39,42 @@ static size_t begin_response(std::string& o) {
     return start;
 }
 
+// "HTTP/1.1 <status>\r\nContent-Type: <ctype>\r\nContent-Length: " for the two content types the
+// handlers use, built once per thread on first use (one memcpy per response instead of five).
+struct Prefix { char s[128]; uint8_t n = 0; };
+static int status_index(int s) {
+    switch (s) {
+        case 200: return 0; case 201: return 1; case 204: return 2; case 400: return 3; case 404: return 4;
+        case 405: return 5; case 408: return 6; case 413: return 7; case 431: return 8; case 501: return 9;
+        default: return 10;
+    }
+}
+static const Prefix* cached_prefix(int status, const char* ctype) {
+    int ci = ctype == kJson ? 0 : ctype == kNdjson ? 1 : -1;
+    if (ci < 0 || (status_index(status) == 10 && status != 500)) return nullptr;  // slot 10 caches 500 only
+    static thread_local Prefix tab[2][11];
+    Prefix& p = tab[ci][status_index(status)];
+    if (!p.n) {
+        size_t n = 0;
+        auto put = [&](const char* s) { size_t l = strlen(s); memcpy(p.s + n, s, l); n += l; };
+        put("HTTP/1.1 "); put(status_text(status)); put("\r\nContent-Type: "); put(ctype); put("\r\nContent-Length: ");
+        p.n = (uint8_t)n;
+    }
+    return &p;
+}
+
 static void finish_response(std::string& o, size_t start, int status, const char* ctype, bool close_after) {
     size_t body = o.size() - start - kHdr;
-    const char* st = status_text(status);
-    size_t stl = strlen(st), ctl = strlen(ctype);
     char d[24];
     size_t dl = std::to_chars(d, d + sizeof d, body).ptr - d;
-    size_t fixed = 9 + stl + 16 + ctl + 18, tail = dl + (close_after ? 19 : 0) + 4;
+    size_t tail = dl + (close_after ? 19 : 0) + 4;
+    const Prefix* pf = cached_prefix(status, ctype);
+    const char* st = nullptr;
+    size_t stl = 0, ctl = 0, fixed;
+    if (pf) fixed = pf->n;
+    else { st = status_text(status); stl = strlen(st); ctl = strlen(ctype); fixed = 9 + stl + 16 + ctl + 18; }
     if (fixed + tail > kHdr) {  // a content type too long for the reserved room: build the header separately
+        if (!st) { st = status_text(status); stl = strlen(st); ctl = strlen(ctype); }
         std::string h = "HTTP/1.1 ";
         h.append(st, stl).append("\r\nContent-Type: ").append(ctype, ctl).append("\r\nContent-Length: ").append(d, dl);
         h += close_after ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n";
@@ -55,11 +84,14 @@ static void finish_response(std::string& o, size_t start, int status, const char
     char* h = &o[start];
     size_t n = 0;
     auto put = [&](const char* s, size_t len) { memcpy(h + n, s, len); n += len; };
-    put("HTTP/1.1 ", 9);
-    put(st, stl);
-    put("\r\nContent-Type: ", 16);
-    put(ctype, ctl);
-    put("\r\nContent-Length: ", 18);
+    if (pf) put(pf->s, pf->n);
+    else {
+        put("HTTP/1.1 ", 9);
+        put(st, stl);
+        put("\r\nContent-Type: ", 16);
+        put(ctype, ctl);
+        put("\r\nContent-Length: ", 18);
+    }
     if (body > kSmallBody) {
         size_t pad = kHdr - fixed - tail;
         memset(h + n, ' ', pad);
@@ -74,9 +106,17 @@ static void finish_response(std::string& o, size_t start, int status, const char
     }
 }
 
+void append_timeout_response(std::string& out) {
+    static constexpr char k408[] =
+        "HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json\r\nContent-Length: 27\r\n"
+        "Connection: close\r\n\r\n{\"error\":\"request timeout\"}";
+    static_assert(sizeof("{\"error\":\"request timeout\"}") - 1 == 27);
+    out.append(k408, sizeof k408 - 1);
+}
+
 static void fail(Conn& c, Worker&, int status, const char* msg) {
     size_t start = begin_response(c.out);
-    Res res{200, "application/json", c.out};
+    Res res{200, kJson, c.out};
     err(res, status, msg);
     finish_response(c.out, start, res.status, res.ctype, true);
     c.want_close = true;
@@ -154,11 +194,12 @@ void process(Conn& c, Worker& w) {
             query = target.substr(qm + 1);
         }
         Params params;
-        int ridx = route_match(parse_method(std::string_view(base, sp1 - base)), path, params);
+        Method method = parse_method(std::string_view(base, sp1 - base));
+        int ridx = route_match(method, path, params);
         if (ridx < 0) {
             bool close_after = !keep_alive || cl > 0;  // don't buffer a body we won't use
             size_t start = begin_response(c.out);
-            Res res{200, "application/json", c.out};
+            Res res{200, kJson, c.out};
             err(res, ridx == -2 ? 405 : 404, ridx == -2 ? "method not allowed" : "not found");
             finish_response(c.out, start, res.status, res.ctype, close_after);
             if (close_after) c.want_close = true;
@@ -175,14 +216,14 @@ void process(Conn& c, Worker& w) {
         }
         c.sent100 = false;
 
-        Req req{parse_method(std::string_view(base, sp1 - base)), path, query,
+        Req req{method, path, query,
                 std::string_view(base + hlen, cl), params};
         size_t start = begin_response(c.out);
-        Res res{200, "application/json", c.out};
+        Res res{200, kJson, c.out};
         try { kRouteHandler[ridx](req, res); }
         catch (...) {
             c.out.resize(start + kHdr);  // drop whatever body was written
-            res.ctype = "application/json";
+            res.ctype = kJson;
             err(res, 500, "internal error");
         }
         finish_response(c.out, start, res.status, res.ctype, !keep_alive);
@@ -190,6 +231,7 @@ void process(Conn& c, Worker& w) {
         pos += total;
         nreq++;
     }
+    c.req_done = nreq != 0;
     if (nreq) w.st->req.store(w.st->req.load(std::memory_order_relaxed) + nreq, std::memory_order_relaxed);
     if (c.want_close) { c.in_len = 0; return; }
     if (pos) {
