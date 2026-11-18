@@ -35,9 +35,15 @@ build/bench: bench/bench.cpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ bench/bench.cpp
 
+build/test-store: tests/store.cpp src/store.h src/types.h build/routes_gen.h
+	$(CXX) $(CXXFLAGS) -Isrc -Ibuild -o $@ $<
+
+test-store: build/test-store
+	build/test-store
+
 clean:
 	rm -rf build
 
 -include $(SERVER_OBJS:.o=.d)
 
-.PHONY: all clean
+.PHONY: all clean test-store

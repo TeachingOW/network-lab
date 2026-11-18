@@ -10,6 +10,9 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <new>
+#include <stdexcept>
 
 #include "types.h"
 
@@ -28,8 +31,12 @@ static_assert(sizeof(Slot) == 64);
 
 class Table {
 public:
+    Table() = default;
+    Table(const Table&) = delete;
+    Table& operator=(const Table&) = delete;
     ~Table() { clear(); }
     size_t size() const { return n_; }
+    size_t capacity() const { return s_ ? mask_ + 1 : 0; }
 
     const Slot* find(u64 key) const {
         if (!n_) return nullptr;
@@ -40,27 +47,25 @@ public:
         }
     }
 
-    void put(u64 key, const char* p, size_t len) {
-        if ((n_ + 1) * 4 > (mask_ + 1) * 3 || !s_) grow();  // keep the load factor at or below 3/4
+    // Keep the lookup/update path inline even with allocation failure handling enabled.
+    [[gnu::always_inline]] void put(u64 key, const char* p, size_t len) {
+        if (!s_) [[unlikely]] grow();
         u64 i = home(key);
         for (;; i = (i + 1) & mask_) {
             Slot& s = s_[i];
-            if (s.cap == Slot::kEmpty) { s.key = key; s.cap = 0; n_++; break; }
-            if (s.key == key) break;
+            if (s.cap == Slot::kEmpty) break;
+            if (s.key == key) { assign(s, s.cap, p, len); return; }
+        }
+        // An overwrite cannot increase the load factor. Probe first so it never rehashes.
+        if (n_ == capacity() * 3 / 4) [[unlikely]] {
+            grow();
+            i = home(key);
+            while (s_[i].cap != Slot::kEmpty) i = (i + 1) & mask_;
         }
         Slot& s = s_[i];
-        if (len <= Slot::kInline) {
-            if (s.cap) { free(s.heap); s.cap = 0; }
-            memcpy(s.inl, p, len);
-        } else {
-            if (s.cap < len) {
-                if (s.cap) free(s.heap);
-                s.heap = (char*)malloc(len);
-                s.cap = (uint32_t)len;
-            }
-            memcpy(s.heap, p, len);
-        }
-        s.len = (uint32_t)len;
+        assign(s, 0, p, len);
+        s.key = key;
+        n_++;
     }
 
     bool erase(u64 key) {
@@ -93,15 +98,44 @@ private:
     unsigned bits_ = 0;
     size_t n_ = 0;
 
+    static void assign(Slot& s, uint32_t cap, const char* p, size_t len) {
+        if (len <= Slot::kInline) {
+            if (cap) free(s.heap);
+            s.cap = 0;
+            memcpy(s.inl, p, len);
+        } else {
+            if (cap < len) reserve_heap(s, cap, len);
+            memcpy(s.heap, p, len);
+        }
+        s.len = (uint32_t)len;
+    }
+
+    // Keep allocation/error handling out of the inline-value hot path.
+    [[gnu::noinline]] static void reserve_heap(Slot& s, uint32_t cap, size_t len) {
+        if (len >= Slot::kEmpty) throw std::length_error("store value too large");
+        // Amortize gradually growing values; realloc may also extend in place.
+        size_t next = cap + size_t(cap) / 2;
+        if (next < len) next = len;
+        if (next >= Slot::kEmpty) next = Slot::kEmpty - 1;
+        char* heap = (char*)realloc(cap ? s.heap : nullptr, next);
+        if (!heap) throw std::bad_alloc();
+        s.heap = heap;
+        s.cap = (uint32_t)next;
+    }
+
     // The shard is picked by the top 8 bits of key * kHashMul; the slot by the bits below those.
     u64 home(u64 key) const { return ((key * kHashMul) << 8) >> (64 - bits_); }
 
     void grow() {
         Slot* old = s_;
         u64 old_n = s_ ? mask_ + 1 : 0;
-        bits_ = s_ ? bits_ + 1 : 6;
+        unsigned bits = s_ ? bits_ + 1 : 6;
+        if (bits >= std::numeric_limits<size_t>::digits - 6) throw std::bad_alloc();
+        Slot* next = (Slot*)aligned_alloc(64, (size_t(1) << bits) * sizeof(Slot));
+        if (!next) throw std::bad_alloc();
+        bits_ = bits;
         mask_ = (1ull << bits_) - 1;
-        s_ = (Slot*)aligned_alloc(64, (mask_ + 1) * sizeof(Slot));
+        s_ = next;
         for (u64 i = 0; i <= mask_; i++) s_[i].cap = Slot::kEmpty;
         for (u64 i = 0; i < old_n; i++) {
             if (old[i].cap == Slot::kEmpty) continue;
@@ -125,7 +159,13 @@ struct alignas(64) Shard {
     Table m;
     void lock() {
         while (lk.test_and_set(std::memory_order_acquire))
-            while (lk.test(std::memory_order_relaxed)) __builtin_ia32_pause();
+            while (lk.test(std::memory_order_relaxed)) {
+#if defined(__i386__) || defined(__x86_64__)
+                __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                __asm__ __volatile__("yield");
+#endif
+            }
     }
     void unlock() { lk.clear(std::memory_order_release); }
 };

@@ -40,3 +40,12 @@ Also `GET|PUT|DELETE /items/:id`, `GET /health`, `GET /stats`.
 
 Notes: chunked request bodies are rejected (501); send Content-Length. `v` is a flat JSON
 string; the parser is intentionally minimal, not a full JSON parser.
+
+Store-only checks and benchmarks (also work on macOS, without liburing):
+
+    make test-store CXX=clang++ CXXFLAGS='-O2 -g -std=c++20 -Wall -Wextra -pthread -fsanitize=address,undefined'
+    python3 bench/compare_store.py --baseline a30d3fa --rounds 9 --cxx clang++
+
+The store probes for an existing key before growing its table. Heap values grow their allocation
+by roughly 1.5x when needed, reusing it for subsequent updates. Failed allocations preserve existing
+items. See RESULTS.md for the measured gains and the extra heap-capacity tradeoff.

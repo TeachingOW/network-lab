@@ -180,3 +180,52 @@ Reproduce on a machine with both trees built (see the header of `bench/compare.p
     build/server -p 8080 -t 4 &
     build/bench -p 8080 -t 4 -d 10 -m get -c 256 -P 8
     build/bench -p 8080 -t 4 -d 10 -m bulk -c 64 -n 100
+
+## Store allocation improvements (2026-11-17)
+
+The store now checks for an existing key before deciding to grow. Previously, at 48 entries in
+a 64-slot table, overwriting any key unnecessarily rehashed into 128 slots. It now keeps 64 slots;
+adding a 49th distinct key still grows the table. Heap allocations grow geometrically (1.5x, or
+the requested length if larger), using `realloc` so small successive increases can reuse capacity.
+Allocation failures throw before publishing a new item or replacing an existing allocation.
+Table ownership is noncopyable, and the spinlock has an ARM64 yield hint as well as the x86 pause.
+
+Store microbenchmarks against commit `a30d3fa`, on macOS arm64 with Apple clang 16.0.0,
+`-O3 -std=c++20 -pthread`. Nine rounds, alternating before/after order; medians:
+
+| Workload | Before ns/op | After ns/op | Before / after |
+|---|---:|---:|---:|
+| Fill 48 keys, overwrite one, destroy; repeat | 5.197 | 1.859 | 2.80x |
+| Grow each of 128 values from 49 to 8,192 bytes, one byte per write | 65.784 | 45.869 | 1.43x |
+| Repeated 3-byte updates across 4,096 keys | 1.503 | 1.346 | 1.12x |
+| Repeated 128-byte updates across 4,096 keys | 4.581 | 3.206 | 1.43x |
+| Lookups across 4,096 keys | 0.973 | 0.971 | 1.00x |
+| Insert 500,000 distinct keys, including rehashes | 45.592 | 40.827 | 1.12x |
+
+The first row counts the 48 inserts and one overwrite per cycle; destruction is included in elapsed
+time. Table allocation calls fall from 40,000 to 20,000, and total bytes requested for table storage
+fall from 245,760,000 to 81,920,000 across 20,000 cycles. These are cumulative allocations, not RSS.
+The growing-value row makes 1,792 heap allocation calls instead of 1,042,432 (99.83% fewer).
+
+These are single-threaded store measurements with allocator counters, not HTTP throughput results.
+The baseline's unused x86 spin hint is disabled when compiling its header on ARM64. Both builds use
+the same benchmark source, compiler and flags, and their result checksums must match. Small timing
+differences depend on compiler decisions and machine noise. Linux networking and contention gains
+have not been measured for this change.
+
+Tradeoff: at growth, heap capacity can be up to roughly 50% larger than the requested value to avoid
+subsequent allocations. Shorter heap-backed updates keep that capacity, so slack can exceed 50%
+after shrinking. New heap values allocate their requested size; moving back to 48 bytes or fewer
+frees the heap buffer. Copying the requested bytes remains O(value length); the optimization
+amortizes allocation and preserves the old value if allocation fails.
+
+Validation: standalone store tests pass under AddressSanitizer and UndefinedBehaviorSanitizer,
+including 100,000 randomized operations checked against `std::unordered_map`, wraparound collision
+deletion, inline/heap transitions, growth-boundary overwrites, injected allocation failures,
+maximum keys and oversized lengths, and four concurrent shard users. The production handlers
+also compile with `-Wall -Wextra -Werror` on ARM64. The full server needs Linux and liburing.
+
+Reproduce from `bulkapi/`:
+
+    make test-store CXX=clang++ CXXFLAGS='-O2 -g -std=c++20 -Wall -Wextra -pthread -fsanitize=address,undefined'
+    python3 bench/compare_store.py --baseline a30d3fa --rounds 9 --cxx clang++
